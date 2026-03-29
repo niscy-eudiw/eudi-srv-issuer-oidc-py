@@ -20,4 +20,4 @@ RUN chmod +x run.sh
 EXPOSE 5000
 
 # Run your script
-CMD ["./run.sh"]
+CMD ["python3", "server.py", "/etc/issuer_config/authorization_config.json"]
