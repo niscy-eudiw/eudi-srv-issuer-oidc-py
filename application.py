@@ -10,7 +10,7 @@ folder = os.path.dirname(os.path.realpath(__file__))
 
 from request_manager import RequestManager
 
-request_manager = RequestManager(default_expiry_minutes=60)
+request_manager = RequestManager(default_expiry_minutes=1450)
 
 
 def init_oidc_op(app):

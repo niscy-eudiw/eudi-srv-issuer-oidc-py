@@ -10,6 +10,7 @@ from uuid import uuid4
 import requests
 
 from cryptojwt import as_unicode
+from cryptojwt.exception import VerificationError
 from flask import Blueprint
 from flask import Response
 from flask import current_app
@@ -20,6 +21,8 @@ from flask import jsonify, abort
 from flask.helpers import make_response
 from flask.helpers import send_from_directory
 import urllib.parse
+
+from idpyoidc.client.oauth2.introspection import Introspection
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.message.oidc import AccessTokenRequest
 from idpyoidc.message.oidc import AuthorizationRequest
@@ -677,6 +680,12 @@ def token():
             refresh_token=refresh_token
         )
 
+        if current_request is None:
+            error_message = {
+                "error": "invalid_grant",
+            }
+            return make_response(jsonify(error_message), 400)
+
         session_id = current_request.session_id
 
         # Pass the request form data to service_endpoint
@@ -803,6 +812,11 @@ def service_endpoint(endpoint, get_args=None):
             )
         else:
             args = endpoint.process_request(req_args, http_info=http_info)
+    except VerificationError as ve:
+        message = traceback.format_exception(*sys.exc_info())
+        _log.error(message)
+        _resp = Introspection.response_cls(active=False)
+        args = {"response_args": _resp}
     except Exception as err:
         message = traceback.format_exception(*sys.exc_info())
         _log.error(message)
