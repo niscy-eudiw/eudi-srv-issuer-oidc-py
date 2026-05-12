@@ -402,18 +402,20 @@ class RequestManager:
                 )
 
     def update_frontend_id(self, session_id: str, frontend_id: str):
-            """
-            Updates the 'frontend_id'. Only the primary dictionary needs to be locked.
-            """
-            with self._requests_lock:
-                request_obj = self._requests.get(session_id)
-                if request_obj:
-                    request_obj.frontend_id = frontend_id
-                    print(f"Updated frontend_id for session_id {session_id} to: {frontend_id}")
-                else:
-                    print(
-                        f"Warning: Attempted to update frontend_id for non-existent session_id: {session_id}"
-                    )
+        """
+        Updates the 'frontend_id'. Only the primary dictionary needs to be locked.
+        """
+        with self._requests_lock:
+            request_obj = self._requests.get(session_id)
+            if request_obj:
+                request_obj.frontend_id = frontend_id
+                print(
+                    f"Updated frontend_id for session_id {session_id} to: {frontend_id}"
+                )
+            else:
+                print(
+                    f"Warning: Attempted to update frontend_id for non-existent session_id: {session_id}"
+                )
 
     def get_request(self, session_id: str) -> Optional[Oid4vciSession]:
         """

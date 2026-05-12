@@ -2,24 +2,23 @@
 
 ## 1. Python
 
-The Authorization Server was tested with
+The EUDIW Issuer was tested with
 
-+ Python version 3.9.2
++ Python version 3.13
 
-and should only be used with Python 3.9 or 3.10.
+and should only be used with Python 3.10+.
 
 If you don't have it installed, please download it from <https://www.python.org/downloads/> and follow the [Python Developer's Guide](https://devguide.python.org/getting-started/).
 
 ## 2. Flask
 
-The Authorization Server was tested with
+The EUDIW Issuer was tested with
 
-+ Flask v. 2.3
++ Flask v. 3.1
 
-and should only be used with Flask v. 2.3 or higher.
+and should only be used with Flask v. 3.1 or higher.
 
-To install [Flask](https://flask.palletsprojects.com/en/2.3.x/), please follow the [Installation Guide](https://flask.palletsprojects.com/en/2.3.x/installation/).
-
+To install [Flask](https://flask.palletsprojects.com/en/stable/), please follow the [Installation Guide](https://flask.palletsprojects.com/en/stable/installation/).
 
 ## 3. How to run the Authorization Server?
 
@@ -29,7 +28,14 @@ To install [Flask](https://flask.palletsprojects.com/en/2.3.x/), please follow t
     git clone git@github.com:eu-digital-identity-wallet/eudi-srv-issuer-oidc-py.git
     ```
 
-2. Activate the environment:
+2. Create a `.venv` folder within the cloned repository:
+
+    ```shell
+    cd eudi-srv-issuer-oidc-py
+    python3 -m venv .venv
+    ```
+
+3. Activate the environment:
 
    Linux/macOS
 
@@ -43,30 +49,30 @@ To install [Flask](https://flask.palletsprojects.com/en/2.3.x/), please follow t
     . .venv\Scripts\Activate
     ```
 
-3. Install or upgrade _pip_
+4. Install or upgrade _pip_
 
     ```shell
     python -m pip install --upgrade pip
     ```
 
-4. Install Flask and other dependencies in virtual environment
+5. Install Flask and other dependencies in virtual environment
 
     ```shell
     pip install -r requirements.txt
     ```
 
-5. Service Configuration
+6. Service Configuration
 
    - Configure the service according to [documentation](api_docs/configuration.md)  
-   ```
-6. Install Issuer Back-End
+   
+7. Install Issuer Back-End
     - Install the service according to [Issuer Back End](https://github.com/eu-digital-identity-wallet/eudi-srv-web-issuing-eudiw-py/blob/main/install.md)
 
-7. Install Issuer Front-End
+8. Install Issuer Front-End
     - Install the service according to [Issuer Front End](https://github.com/eu-digital-identity-wallet/eudi-srv-web-issuing-frontend-eudiw-py/blob/main/install.md)
 
 
-8. Run the EUDIW Authorization Server
+9. Run the EUDIW Authorization Server
 
     On the root directory of the clone repository, insert one of the following command lines to run the EUDIW Authorization Server.
 

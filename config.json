@@ -33,10 +33,10 @@
       }
    },
    "port":5000,
-   "domain":"dev.issuer.eudiw.dev/oidc",
+   "domain":"issuer.eudiw.dev/oidc",
    "server_name":"{domain}",
-   "base_url":"https://dev.issuer.eudiw.dev/oidc",
-   "authorization_redirect_url":"https://dev.issuer.eudiw.dev/auth_choice",
+   "base_url":"https://issuer.eudiw.dev/oidc",
+   "authorization_redirect_url":"https://issuer.eudiw.dev/auth_choice",
    "op":{
       "server_info":{
          "add_ons":{
@@ -65,8 +65,8 @@
                      "PS512"
                   ],
                   "allowed_htu":[
-                     "https://dev.issuer.eudiw.dev/token",
-                     "https://dev.issuer.eudiw.dev/oidc/token"
+                     "https://issuer.eudiw.dev/token",
+                     "https://issuer.eudiw.dev/oidc/token"
                   ]
                }
             }
@@ -246,7 +246,9 @@
                      "public",
                      "wallet_attestation",
                      "dpop"
-                  ]
+                  ],
+                  "trusted_attesters_path":"/etc/eudiw/pid-issuer/oidc_trusted_attesters",
+                  "trust_validator_url":"https://trust-validator.eudiw.dev/trust"
                }
             },
             "userinfo":{

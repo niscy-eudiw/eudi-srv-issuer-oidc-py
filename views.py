@@ -401,7 +401,6 @@ def authorization():
         _response = json.loads(response.get_data(as_text=True))
 
         jws = _response.get("jws")
-        
 
         redirect_url = (
             current_app.authorization_redirect_url
@@ -419,9 +418,11 @@ def authorization():
 
         current_request = request_manager.get_request(session_id=session_id)
 
-        if current_request is not None and getattr(current_request, "frontend_id", None):
+        if current_request is not None and getattr(
+            current_request, "frontend_id", None
+        ):
             redirect_url += "&frontend_id=" + current_request.frontend_id
-            
+
         return redirect(redirect_url)
 
     except requests.exceptions.RequestException as e:
@@ -633,7 +634,7 @@ def token():
             "grant_type": "authorization_code",
             "code": current_request.pre_authorized_code,
             "redirect_uri": "preauth",  # This should be a consistent value for internal use
-            "client_id": "wallet-dev-preauth",
+            "client_id": "eudiw-abca",
             "state": "vFs5DfvJqoyHj7_dZs2JbdklePg6pMLsUHHmVIfobRw",
         }
 
@@ -947,7 +948,7 @@ def prea_auth():
     scope = request.form.get("scope")  # request_data.get("scope")
     authorization_details = None  # request_data.get("authorization_details")
 
-    client_id = "wallet-dev-preauth"
+    client_id = "eudiw-abca"
     redirect_uri = "preauth"
     response_type = "code"
 

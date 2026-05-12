@@ -4,6 +4,6 @@ services:
     ports:
       - "6005:5000"
     volumes:
-      - ./config.json:/config.json:ro
+      - ./config.json:/etc/issuer_config/authorization_config.json:ro
       - /tmp/oidc_log_dev/:/tmp/oidc_log_dev/
     restart: unless-stopped
