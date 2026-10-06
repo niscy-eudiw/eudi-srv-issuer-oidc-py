@@ -6,4 +6,7 @@ services:
     volumes:
       - ./config.json:/etc/issuer_config/authorization_config.json:ro
       - /tmp/oidc_log_dev/:/tmp/oidc_log_dev/
+      # Signing, cookie and token keys (generated on first start; keep them
+      # across restarts). The host directory must be writable by UID 10001.
+      - /etc/eudiw/oidc-keys/:/app/private/
     restart: unless-stopped

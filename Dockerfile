@@ -28,10 +28,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /install /usr/local
-COPY . .
+# Only the application: no tests, docs or key material. Keys are generated at
+# the first start into /app/private (mount a volume there to keep them).
+COPY *.py openid-configuration.json run.sh ./
+COPY templates/ ./templates/
 
+# Unprivileged user (fixed UID so host-mounted directories can be granted to
+# it: chown 10001 <dir>). It writes the keys and the published static/jwks.json.
 RUN chmod +x run.sh \
- && mkdir -p /tmp/oidc_log_dev
+ && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin issuer \
+ && mkdir -p /tmp/oidc_log_dev /app/private /app/static \
+ && chown -R issuer:issuer /app /tmp/oidc_log_dev
+
+USER issuer
 
 EXPOSE 5000
 

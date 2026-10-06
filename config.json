@@ -34,6 +34,11 @@
     "server_name": "{domain}",
     "base_url": "https://issuer.eudiw.dev/oidc",
     "authorization_redirect_url": "https://issuer.eudiw.dev/auth_choice",
+    "backend_api_key": "change-me",
+    "rate_limiting": {
+        "enabled": true,
+        "trusted_proxies": 1
+    },
     "op": {
         "server_info": {
             "add_ons": {
@@ -54,9 +59,6 @@
                             "ES256",
                             "ES384",
                             "ES512",
-                            "HS256",
-                            "HS384",
-                            "HS512",
                             "PS256",
                             "PS384",
                             "PS512"
@@ -279,7 +281,7 @@
                 }
             },
             "httpc_params": {
-                "verify": false
+                "verify": true
             },
             "issuer": "https://{domain}",
             "keys": {
@@ -301,7 +303,14 @@
             },
             "template_dir": "templates",
             "token_handler_args": {
-                "jwks_file": "private/token_jwks.json",
+                "jwks_def": {
+                    "private_path": "private/token_jwks.json",
+                    "key_defs": [
+                        {"type": "oct", "bytes": 24, "use": ["enc"], "kid": "code"},
+                        {"type": "oct", "bytes": 24, "use": ["enc"], "kid": "refresh"}
+                    ],
+                    "read_only": false
+                },
                 "code": {
                     "kwargs": {
                         "lifetime": 600
@@ -348,12 +357,10 @@
         }
     },
     "webserver": {
-        "server_cert": "certs/client.crt",
-        "server_key": "certs/client.key",
         "ca_bundle": null,
         "verify_user": false,
         "port": 5000,
         "domain": "{domain}",
-        "debug": true
+        "debug": false
     }
 }

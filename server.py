@@ -11,8 +11,10 @@ from idpyoidc.ssl_context import create_context
 
 try:
     from .application import oidc_provider_init_app
+    from .security import init_rate_limits
 except (ModuleNotFoundError, ImportError):
     from application import oidc_provider_init_app
+    from security import init_rate_limits
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
@@ -51,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 def main(config_file, args):
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     config = create_from_config_file(
         Configuration,
         entity_conf=[
@@ -64,6 +66,9 @@ def main(config_file, args):
     app.logger = config.logger
 
     app.authorization_redirect_url = config.authorization_redirect_url
+    # Shared with the issuer backend; protects /preauth_generate.
+    app.backend_api_key = getattr(config, "backend_api_key", None)
+    init_rate_limits(app, getattr(config, "rate_limiting", None))
 
     web_conf = config.web_conf
 

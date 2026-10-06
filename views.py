@@ -1,6 +1,6 @@
 import json
 import os
-import random
+import secrets
 import sys
 import traceback
 from typing import Union
@@ -36,12 +36,16 @@ from idpyoidc.server.oidc.token import Token
 
 oidc_op_views = Blueprint("oidc_op", __name__, url_prefix="")
 from application import request_manager
+from security import backend_api_key_error, redact, session_token
+import dpop
 
 
 def _add_cookie(resp: Response, cookie_spec: Union[dict, list]):
     kwargs = {k: v for k, v in cookie_spec.items() if k not in ("name",)}
     kwargs["path"] = "/"
     kwargs["samesite"] = "Lax"
+    kwargs["secure"] = True
+    kwargs["httponly"] = True
     resp.set_cookie(cookie_spec["name"], **kwargs)
 
 
@@ -76,7 +80,7 @@ def index():
 def do_response(endpoint, req_args, error="", **args) -> Response:
     info = endpoint.do_response(request=req_args, error=error, **args)
     _log = current_app.logger
-    _log.debug("do_response: {}".format(info))
+    _log.debug("do_response: {}".format(redact(info)))
 
     try:
         _response_placement = info["response_placement"]
@@ -87,19 +91,19 @@ def do_response(endpoint, req_args, error="", **args) -> Response:
 
     if error:
         if _response_placement == "body":
-            _log.info("Error Response: {}".format(info["response"]))
+            _log.info("Error Response: {}".format(redact(info["response"])))
             _http_response_code = info.get("response_code", 400)
             resp = make_response(info["response"], _http_response_code)
         else:  # _response_placement == 'url':
-            _log.info("Redirect to: {}".format(info["response"]))
+            _log.info("Error redirect issued")
             resp = redirect(info["response"])
     else:
         if _response_placement == "body":
-            _log.info("Response: {}".format(info["response"]))
+            _log.debug("Response: {}".format(redact(info["response"])))
             _http_response_code = info.get("response_code", 200)
             resp = make_response(info["response"], _http_response_code)
         else:  # _response_placement == 'url':
-            _log.info("Redirect to: {}".format(info["response"]))
+            _log.info("Redirect issued")
             resp = redirect(info["response"])
 
     for key, value in info["http_headers"]:
@@ -161,6 +165,27 @@ def auth_error_redirect(return_uri, error, error_description=None):
     )
 
 
+def _session_matches_request(session_id, authz_request) -> bool:
+    """Tells whether an issuance session belongs to an authorization request.
+
+    Args:
+        session_id: Session id sent back by the issuer backend.
+        authz_request: Authorization request from the signed token.
+
+    Returns:
+        True when the session was created for this client, redirect URI,
+        state and PKCE challenge.
+    """
+    current_request = request_manager.get_request(session_id=session_id)
+    if current_request is None:
+        return False
+    for name in ("client_id", "redirect_uri", "state", "code_challenge"):
+        stored = getattr(current_request, name, None)
+        if (stored or None) != (authz_request.get(name) or None):
+            return False
+    return True
+
+
 def verify(authn_method):
     """
     Authentication verification
@@ -190,6 +215,20 @@ def verify(authn_method):
             # return render_template("misc/500.html", error="Authentication verification Error")
 
     authz_request = AuthorizationRequest().from_urlencoded(auth_args["query"])
+
+    # The token proves which authorization request is being completed; the
+    # username (issuance session) must be the one created for that request,
+    # or anyone holding a token could complete it with another session.
+    if not _session_matches_request(username, authz_request):
+        current_app.logger.warning(
+            f"Authorization verification: session {username} does not match the token's request"
+        )
+        return make_response(
+            json.dumps(
+                {"error": "invalid_request", "error_description": "Session mismatch"}
+            ),
+            400,
+        )
 
     endpoint = current_app.server.get_endpoint("authorization")
 
@@ -318,7 +357,7 @@ def authorization():
         session_id = current_request.session_id
 
         current_app.logger.info(
-            f"Session ID: {session_id}, Authorization Request (PAR), Payload: {request.args.to_dict()}"
+            f"Session ID: {session_id}, Authorization Request (PAR), Payload: {redact(request.args.to_dict())}"
         )
 
         scope = current_request.scope
@@ -360,7 +399,7 @@ def authorization():
         session_id = str(uuid4())
 
         current_app.logger.info(
-            f"Session ID: {session_id}, Authorization Request (Non-PAR), Payload: {request.args.to_dict()}"
+            f"Session ID: {session_id}, Authorization Request (Non-PAR), Payload: {redact(request.args.to_dict())}"
         )
 
         try:
@@ -399,9 +438,10 @@ def authorization():
                 authorization_details=authorization_details,
                 session_id=session_id,
                 state=state,
+                issuer_state=issuer_state,
             )
         except Exception as e:
-            print(f"Error adding request: {e}")
+            current_app.logger.error(f"Error adding request: {e}")
             return jsonify({"error": "Failed to process request"}), 500
 
         authorization_args = {
@@ -438,18 +478,26 @@ def authorization():
             + session_id
         )
         if scope:
-            redirect_url += "&scope=" + scope
+            redirect_url += "&scope=" + urllib.parse.quote(scope)
 
         if authorization_details:
             encoded_auth_details = urllib.parse.quote(json.dumps(authorization_details))
             redirect_url += "&authorization_details=" + encoded_auth_details
 
         current_request = request_manager.get_request(session_id=session_id)
+        frontend_id = getattr(current_request, "frontend_id", None) if current_request else None
 
-        if current_request is not None and getattr(
-            current_request, "frontend_id", None
-        ):
-            redirect_url += "&frontend_id=" + current_request.frontend_id
+        if frontend_id:
+            redirect_url += "&frontend_id=" + urllib.parse.quote(frontend_id)
+
+        # Signed copy of the session id, scope and authorization details:
+        # the backend trusts these claims, not the plain query parameters.
+        redirect_url += "&session_token=" + session_token(
+            session_id=session_id,
+            scope=scope,
+            authorization_details=authorization_details,
+            frontend_id=frontend_id,
+        )
 
         return redirect(redirect_url)
 
@@ -493,13 +541,12 @@ def par_endpoint():
     issuer_state = request.form.get("issuer_state")
     frontend_id = request.form.get("frontend_id")
 
-    if issuer_state:
-        session_id = issuer_state
-    else:
-        session_id = str(uuid4())
+    # issuer_state comes from the wallet (a credential offer): using it as the
+    # session id would let a client choose or overwrite another session.
+    session_id = str(uuid4())
 
     current_app.logger.info(
-        f"Session ID: {session_id}, Pushed Authorization Request, Payload: {request.form.to_dict()}"
+        f"Session ID: {session_id}, Pushed Authorization Request, Payload: {redact(request.form.to_dict())}"
     )
 
     authorization_details = None
@@ -534,6 +581,7 @@ def par_endpoint():
             authorization_details=authorization_details,
             session_id=session_id,
             state=state,
+            issuer_state=issuer_state,
         )
 
         request_manager.update_request_uri(
@@ -546,12 +594,10 @@ def par_endpoint():
             )
 
     except Exception as e:
-        print(f"Error adding request: {e}")
+        current_app.logger.error(f"Error adding request: {e}")
         return jsonify({"error": "Failed to process request"}), 500
 
-    current_app.logger.info(
-        f", Session ID: {session_id}, Pushed Authorization Response, Payload: {response.json}"
-    )
+    current_app.logger.info(f", Session ID: {session_id}, Pushed Authorization Response")
 
     return response
 
@@ -561,12 +607,52 @@ def token():
     return service_endpoint(current_app.server.get_endpoint("token")) """
 
 
+def _allowed_htu():
+    """Public token endpoint URLs a DPoP proof may address (``allowed_htu``)."""
+    conf = current_app.server.get_context().conf.get("conf") or {}
+    return conf.get("add_ons", {}).get("dpop", {}).get("kwargs", {}).get("allowed_htu") or []
+
+
+def _bind_dpop(response_json, jkt, current_request):
+    """Binds the issued access token to the DPoP key, if a proof was sent.
+
+    Args:
+        response_json: Token response (updated: ``token_type`` becomes DPoP).
+        jkt: Thumbprint of the proof key, or None without a proof.
+        current_request: Issuance session.
+
+    Returns:
+        None, or an error response when a refresh changes the key.
+    """
+    bound = getattr(current_request, "dpop_jkt", None)
+    if bound and jkt != bound:
+        return make_response(
+            jsonify({"error": "invalid_dpop_proof", "error_description": "DPoP key differs from the bound key"}), 400
+        )
+    if jkt and "access_token" in response_json:
+        dpop.bindings.bind(response_json["access_token"], jkt, float(response_json.get("expires_in") or 3600))
+        current_request.dpop_jkt = jkt
+        response_json["token_type"] = "DPoP"
+    return None
+
+
 @oidc_op_views.route("/token", methods=["POST"])
 def token():
     req_args = dict([(k, v) for k, v in request.form.items()])
 
     grant_type = req_args.get("grant_type")
     response = None
+
+    # A DPoP proof binds the tokens to the wallet key (RFC 9449).
+    jkt = None
+    if "DPoP" in request.headers:
+        try:
+            jkt = dpop.verify_proof(request.headers["DPoP"], request.method, _allowed_htu())
+        except dpop.DPoPError as e:
+            current_app.logger.warning(f"Token request rejected: {e}")
+            return make_response(
+                jsonify({"error": "invalid_dpop_proof", "error_description": "Invalid DPoP proof"}), 400
+            )
 
     if grant_type == "authorization_code":
         code = req_args.get("code")
@@ -577,12 +663,12 @@ def token():
             )
 
         current_request = request_manager.get_request_by_code(code)
+        if current_request is None:
+            return make_response(jsonify({"error": "invalid_grant"}), 400)
 
         session_id = current_request.session_id
 
-        current_app.logger.info(
-            f", Session ID: {session_id}, Token Request, Payload: {request.form.to_dict()}"
-        )
+        current_app.logger.info(f", Session ID: {session_id}, Token Request")
 
         # Pass the request form data to service_endpoint for accurate processing
         response_obj = service_endpoint(current_app.server.get_endpoint("token"))
@@ -594,9 +680,11 @@ def token():
 
         response_json = json.loads(response_data)
 
-        current_app.logger.info(
-            f", Session ID: {session_id}, Token Response, Payload: {response_json}"
-        )
+        current_app.logger.info(f", Session ID: {session_id}, Token Response issued")
+
+        binding_error = _bind_dpop(response_json, jkt, current_request)
+        if binding_error is not None:
+            return binding_error
 
         if "access_token" in response_json:
             request_manager.update_access_token(
@@ -631,29 +719,30 @@ def token():
                 400,
             )
 
-        tx_code_int = int(tx_code_from_request)
-
         current_request = request_manager.get_request_by_preauth_code_ref(
             pre_authorized_code_from_request
         )
 
-        session_id = current_request.session_id
-
         if (
-            not current_request
-            or current_request.pre_authorized_code_ref
-            != pre_authorized_code_from_request
+            current_request is None
+            or current_request.pre_authorized_code_ref != pre_authorized_code_from_request
+            or request_manager.preauth_code_expired(current_request)
         ):
             error_message = {
-                "error": "invalid_request",
+                "error": "invalid_grant",
                 "description": "invalid or expired pre-authorized_code",
             }
             return make_response(jsonify(error_message), 400)
 
-        if tx_code_int != current_request.tx_code:
+        session_id = current_request.session_id
+
+        if not secrets.compare_digest(str(tx_code_from_request), str(current_request.tx_code)):
+            revoked = request_manager.register_tx_code_failure(current_request)
             error_message = {
-                "error": "invalid_request",
-                "description": "invalid tx_code",
+                "error": "invalid_grant",
+                "description": "pre-authorized_code revoked after too many attempts"
+                if revoked
+                else "invalid tx_code",
             }
             return make_response(jsonify(error_message), 400)
 
@@ -680,9 +769,12 @@ def token():
 
         response_json = json.loads(response_data)  # Ensure it's JSON from get_data()
 
-        current_app.logger.info(
-            f", Session ID: {session_id}, Pre-Authorized Token Response, Payload: {response_json}"
-        )
+        request_manager.revoke_preauth_code(current_request)
+        current_app.logger.info(f", Session ID: {session_id}, Pre-Authorized Token Response issued")
+
+        binding_error = _bind_dpop(response_json, jkt, current_request)
+        if binding_error is not None:
+            return binding_error
 
         if "access_token" in response_json:
             request_manager.update_access_token(
@@ -726,6 +818,10 @@ def token():
 
         response_json = json.loads(response_data)
 
+        binding_error = _bind_dpop(response_json, jkt, current_request)
+        if binding_error is not None:
+            return binding_error
+
         if "access_token" in response_json:
             request_manager.update_access_token(
                 session_id=session_id, access_token=response_json["access_token"]
@@ -736,9 +832,7 @@ def token():
                 session_id=session_id, refresh_token=response_json["refresh_token"]
             )
 
-        current_app.logger.info(
-            f", Session ID: {session_id}, Refresh Token Response, Payload: {response_json}"
-        )
+        current_app.logger.info(f", Session ID: {session_id}, Refresh Token Response issued")
 
         return jsonify(response_json)  # Return as JSON
 
@@ -755,7 +849,22 @@ def token():
 
 @oidc_op_views.route("/introspection", methods=["POST"])
 def introspection_endpoint():
-    return service_endpoint(current_app.server.get_endpoint("introspection"))
+    # Only the issuer backend introspects tokens.
+    api_key_error = backend_api_key_error()
+    if api_key_error is not None:
+        return api_key_error
+
+    response = service_endpoint(current_app.server.get_endpoint("introspection"))
+    if response.status_code != 200:
+        return response
+    body = json.loads(response.get_data(as_text=True))
+    jkt = dpop.bindings.jkt(request.form.get("token", ""))
+    if body.get("active") and jkt:
+        # RFC 9449 section 6.2: the resource server checks the proof key.
+        body["cnf"] = {"jkt": jkt}
+    result = make_response(jsonify(body), 200)
+    result.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @oidc_op_views.route("/userinfo", methods=["GET", "POST"])
@@ -784,7 +893,7 @@ def service_endpoint(endpoint, get_args=None):
         # name is not unique
         "cookie": [{"name": k, "value": v} for k, v in request.cookies.items()],
     }
-    _log.info(f"http_info: {http_info}")
+    _log.debug(f"http_info: {redact(http_info)}")
 
     if request.method == "GET":
         args_for_parsing = get_args if get_args is not None else request.args.to_dict()
@@ -827,13 +936,13 @@ def service_endpoint(endpoint, get_args=None):
             return make_response(err_msg.to_json(), 400)
 
     if isinstance(req_args, ResponseMessage) and "error" in req_args:
-        _log.info("Error response: {}".format(req_args))
+        _log.info("Error response: {}".format(redact(req_args)))
         _resp = make_response(req_args.to_json(), 400)
         if request.method == "POST":
             _resp.headers["Content-type"] = "application/json"
         return _resp
     try:
-        _log.info("request: {}".format(req_args))
+        _log.debug("request: {}".format(redact(req_args)))
         if isinstance(endpoint, Token):
             args = endpoint.process_request(
                 AccessTokenRequest(**req_args), http_info=http_info
@@ -851,7 +960,7 @@ def service_endpoint(endpoint, get_args=None):
         err_msg = ResponseMessage(error="invalid_request", error_description=str(err))
         return make_response(err_msg.to_json(), 400)
 
-    _log.info("Response args: {}".format(args))
+    _log.debug("Response args: {}".format(redact(args)))
 
     if "redirect_location" in args:
         return redirect(args["redirect_location"])
@@ -865,28 +974,6 @@ def service_endpoint(endpoint, get_args=None):
 @oidc_op_views.errorhandler(werkzeug.exceptions.BadRequest)
 def handle_bad_request(e):
     return "bad request!", 400
-
-
-@oidc_op_views.route("/jwt_token", methods=["GET"])
-def jws_token():
-    req_args = request.args.to_dict()
-    session_id = req_args.get("session_id")
-    token = req_args.get("token")
-
-    # This is a test to redirect to an issuer endpoint that will call the oauth country form / countries and save data before continuing.
-
-    return redirect(
-        "https://dev.issuer.eudiw.dev/oidc/verify/user"
-        + "?"
-        + urllib.parse.urlencode(
-            {
-                "token": token,
-                "username": session_id,
-            }
-        )
-    )
-
-    return req_args
 
 
 @oidc_op_views.route("/check_session_iframe", methods=["GET", "POST"])
@@ -904,7 +991,7 @@ def check_session_iframe():
         # will contain client_id and origin
         if req_args["origin"] != _context.issuer:
             return "error"
-        if req_args["client_id"] != _context.cdb:
+        if req_args["client_id"] not in _context.cdb:
             return "error"
         return "OK"
 
@@ -964,9 +1051,13 @@ def post_logout():
     return page
 
 
-# Testing endpoint for preauth flow
+# Pre-authorized flow: only the issuer backend may mint codes (X-Api-Key).
 @oidc_op_views.route("/preauth_generate", methods=["POST"])
 def prea_auth():
+    api_key_error = backend_api_key_error()
+    if api_key_error is not None:
+        return api_key_error
+
     session_id = str(uuid4())
     current_app.logger.info(f"Session ID: {session_id}, Pre-Auth generate")
     # request_data = request.get_json(silent=True)
@@ -1033,7 +1124,7 @@ def prea_auth():
             "unhandled_exception",
         )
 
-    tx_code = random.randint(10000, 99999)
+    tx_code = 10000 + secrets.randbelow(90000)
 
     try:
         request_manager.add_request(
@@ -1046,7 +1137,7 @@ def prea_auth():
             tx_code=tx_code,
         )
     except Exception as e:
-        print(f"Error adding request: {e}")
+        current_app.logger.error(f"Error adding request: {e}")
         return jsonify({"error": "Failed to process request"}), 500
 
     try:

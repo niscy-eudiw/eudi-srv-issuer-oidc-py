@@ -11,6 +11,7 @@
         "authorization_code",
         "implicit",
         "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "urn:ietf:params:oauth:grant-type:pre-authorized_code",
         "refresh_token"
     ],
     "jwks_uri": "https://dev.issuer.eudiw.dev/oidc/static/jwks.json",
@@ -71,10 +72,8 @@
         "PS384",
         "PS512"
     ],
-    "frontchannel_logout_supported": true,
-    "frontchannel_logout_session_required": true,
-    "backchannel_logout_supported": true,
-    "backchannel_logout_session_required": true,
+    "frontchannel_logout_supported": false,
+    "backchannel_logout_supported": false,
     "code_challenge_methods_supported": [
         "S256"
     ],
@@ -84,6 +83,5 @@
     "authorization_endpoint": "https://dev.issuer.eudiw.dev/oidc/authorization",
     "token_endpoint": "https://dev.issuer.eudiw.dev/oidc/token",
     "userinfo_endpoint": "https://dev.issuer.eudiw.dev/oidc/userinfo",
-    "end_session_endpoint": "https://dev.issuer.eudiw.dev/oidc/session",
     "pushed_authorization_request_endpoint": "https://dev.issuer.eudiw.dev/oidc/pushed_authorization"
 }
