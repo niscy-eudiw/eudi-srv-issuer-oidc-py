@@ -32,7 +32,6 @@ from idpyoidc.server.exception import FailedAuthentication
 from idpyoidc.server.exception import ClientAuthenticationError
 from idpyoidc.server.oidc.token import Token
 
-
 # logger = logging.getLogger(__name__)
 
 oidc_op_views = Blueprint("oidc_op", __name__, url_prefix="")
@@ -204,13 +203,14 @@ def verify(authn_method):
 
     args = endpoint.authz_part2(request=authz_request, session_id=_session_id)
 
-    if isinstance(args, ResponseMessage) and "error" in args:
-        current_app.logger.error(
-            f"authz_part2 returned error for session {username}: {args.to_dict()}"
-        )
-        return make_response(args.to_json(), 400)
-
+    # authz_part2 returns a dict and reports errors inside response_args
     response_dict = args.get("response_args").to_dict()
+
+    if "error" in response_dict:
+        current_app.logger.error(
+            f"authz_part2 returned error for session {username}: {response_dict}"
+        )
+        return make_response(json.dumps(response_dict), 400)
 
     code = response_dict.get("code")
     if code is None:
@@ -218,7 +218,9 @@ def verify(authn_method):
             f"No 'code' in response_args for session {username}: {response_dict}"
         )
         return make_response(
-            json.dumps({"error": "server_error", "error_description": "no code issued"}),
+            json.dumps(
+                {"error": "server_error", "error_description": "no code issued"}
+            ),
             500,
         )
 
@@ -264,10 +266,22 @@ def registration_api():
 
 
 def dynamic_registration(client_id, redirect_uri):
+    _context = current_app.server.get_context()
+    # process_request_authorization replaces the client's redirect_uris with only
+    # the new one, so keep the previous ones to not break in-flight sessions
+    previous_uris = list(_context.cdb.get(client_id, {}).get("redirect_uris", []))
     try:
         current_app.server.get_endpoint("registration").process_request_authorization(
             client_id=client_id, redirect_uri=redirect_uri
         )
+
+        _cinfo = _context.cdb[client_id]
+        merged_uris = list(_cinfo.get("redirect_uris", []))
+        for uri in previous_uris:
+            if uri not in merged_uris:
+                merged_uris.append(uri)
+        _cinfo["redirect_uris"] = merged_uris
+        _context.cdb[client_id] = _cinfo
     except Exception as e:
         current_app.logger.error(
             f"Error during client registration/update in traditional flow: {e}"
@@ -1072,10 +1086,14 @@ def prea_auth():
 
     args = endpoint.authz_part2(request=authz_request, session_id=_session_id)
 
-    if isinstance(args, ResponseMessage) and "error" in args:
-        return make_response(args.to_json(), 400)
-
+    # authz_part2 returns a dict and reports errors inside response_args
     response_dict = args.get("response_args").to_dict()
+
+    if "error" in response_dict:
+        current_app.logger.error(
+            f"authz_part2 returned error for pre-auth session {username}: {response_dict}"
+        )
+        return make_response(json.dumps(response_dict), 400)
 
     request_manager.update_pre_authorized_code(
         session_id=username, pre_authorized_code=response_dict["code"]
