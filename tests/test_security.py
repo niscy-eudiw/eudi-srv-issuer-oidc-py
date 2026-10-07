@@ -177,6 +177,30 @@ class TestPreAuthorizedCodes:
         stored.preauth_expiry_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
         assert self._redeem(client, body["preauth_code"], str(body["tx_code"])).status_code == 400
 
+    def test_concurrent_guesses_cannot_exceed_the_limit(self, client):
+        """A burst of guesses all found the code before any revoked it: 9 of 20 were compared."""
+        import threading
+        from collections import Counter
+
+        body = self._generate(client).get_json()
+        stored = application.request_manager.get_request(session_id=body["session_id"])
+        wrong = "00000" if body["tx_code"] != 0 else "11111"
+        barrier = threading.Barrier(20)
+        outcomes = []
+
+        def guess():
+            barrier.wait()
+            outcomes.append(application.request_manager.check_tx_code(stored, wrong))
+
+        threads = [threading.Thread(target=guess) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert Counter(outcomes) == {"wrong": 4, "revoked": 1, "invalid": 15}
+        assert application.request_manager.check_tx_code(stored, str(body["tx_code"])) == "invalid"
+
 
 class TestRateLimits:
     def test_token_endpoint_throttled(self, app):
@@ -186,6 +210,35 @@ class TestRateLimits:
         client = app.test_client()
         codes = [client.post("/token", data={"grant_type": "x"}).status_code for _ in range(5)]
         assert codes[:3] == [400, 400, 400] and codes[3:] == [429, 429]
+
+    @staticmethod
+    def _token_codes(client, remote, forwarded):
+        return [
+            client.post(
+                "/token", data={"grant_type": "x"}, environ_base={"REMOTE_ADDR": remote},
+                headers={"X-Forwarded-For": wallet},
+            ).status_code
+            for wallet in forwarded
+        ]
+
+    def test_wallets_behind_a_forwarder_have_their_own_limit(self, app):
+        """Relayed requests (PAR through the frontend) shared the frontend's limit."""
+        from security import init_rate_limits
+
+        init_rate_limits(app, {"trusted_proxies": 0, "forwarders": ["10.0.0.5"],
+                               "limits": {"oidc_op.token": "3 per minute"}})
+        client = app.test_client()
+        assert self._token_codes(client, "10.0.0.5", ["198.51.100.1"] * 4) == [400, 400, 400, 429]
+        assert self._token_codes(client, "10.0.0.5", ["198.51.100.2"] * 3) == [400, 400, 400]
+
+    def test_other_peers_cannot_choose_their_key(self, app):
+        from security import init_rate_limits
+
+        init_rate_limits(app, {"trusted_proxies": 0, "forwarders": ["10.0.0.5"],
+                               "limits": {"oidc_op.token": "3 per minute"}})
+        client = app.test_client()
+        spoofed = [f"198.51.100.{i}" for i in range(10, 14)]
+        assert self._token_codes(client, "10.0.0.9", spoofed) == [400, 400, 400, 429]
 
 
 def _with_dpop(headers=None):
@@ -545,6 +598,78 @@ class TestClientRegistration:
         )
         assert response.status_code == 400
         assert "Location" not in response.headers
+
+
+class TestConcurrentRegistration:
+    """Concurrent registrations of one client (the internal pre-authorized
+    client on every offer, a wallet running two flows) briefly left the client
+    without redirect URIs: "No registered redirect_uri", answered with 500."""
+
+    @staticmethod
+    def _register(app, client_id, uri, internal=False):
+        import views
+
+        with app.test_request_context("/"):
+            return views.dynamic_registration(client_id, uri, internal=internal)
+
+    def test_known_redirect_uri_leaves_the_entry_untouched(self, app):
+        cdb = app.server.get_context().cdb
+        assert self._register(app, "eudiw-abca", "preauth", internal=True)[0] is None
+        entry = cdb["eudiw-abca"]
+        assert self._register(app, "eudiw-abca", "preauth", internal=True)[0] is None
+        assert cdb["eudiw-abca"] is entry
+
+    def test_concurrent_registrations_keep_every_uri_and_never_empty_the_client(self, app):
+        import threading
+
+        cdb = app.server.get_context().cdb
+        assert self._register(app, "wallet-c", "https://wallet.test/cb0")[0] is None
+        uris = [f"https://wallet.test/cb{i}" for i in range(1, 9)]
+        barrier = threading.Barrier(len(uris) + 1)
+        stop = threading.Event()
+        seen_without_uris = []
+
+        def reader():
+            barrier.wait()
+            while not stop.is_set():
+                if not cdb.get("wallet-c", {}).get("redirect_uris"):
+                    seen_without_uris.append(True)
+
+        def register(uri):
+            barrier.wait()
+            assert self._register(app, "wallet-c", uri)[0] is None
+
+        watcher = threading.Thread(target=reader)
+        watcher.start()
+        threads = [threading.Thread(target=register, args=(uri,)) for uri in uris]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        stop.set()
+        watcher.join()
+
+        registered = {tuple(u)[0] for u in cdb["wallet-c"]["redirect_uris"]}
+        assert registered == {"https://wallet.test/cb0", *uris}
+        assert not seen_without_uris
+
+    def test_restore_takes_back_only_its_own_uri(self, app):
+        cdb = app.server.get_context().cdb
+        assert self._register(app, "wallet-r", "https://wallet.test/a")[0] is None
+        error, restore = self._register(app, "wallet-r", "https://wallet.test/b")
+        assert error is None
+        assert self._register(app, "wallet-r", "https://wallet.test/c")[0] is None
+        restore()
+        assert {tuple(u)[0] for u in cdb["wallet-r"]["redirect_uris"]} == {
+            "https://wallet.test/a",
+            "https://wallet.test/c",
+        }
+
+    def test_restore_removes_a_client_it_created(self, app):
+        error, restore = self._register(app, "wallet-new", "https://wallet.test/cb")
+        assert error is None
+        restore()
+        assert "wallet-new" not in app.server.get_context().cdb
 
 
 class TestErrorRedirect:

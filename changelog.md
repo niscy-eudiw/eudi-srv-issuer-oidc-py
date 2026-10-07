@@ -42,7 +42,14 @@ _06 Oct 2026_
 
 ## [Unreleased]
 
+### Fixed
+- tx_code attempt limit under concurrency: a burst of wrong guesses all found the pre-authorized code before any revoked it, so more than 5 were compared (9 of 20 in a local test). `RequestManager.check_tx_code` compares and counts in one locked step and never compares a code that reached the limit; it replaces `register_tx_code_failure`.
+- PAR relayed by the issuer frontend shared one rate limit: the frontend names the wallet in `X-Forwarded-For`, but the server only trusted that header behind `trusted_proxies`, where any client could set it. New `rate_limiting.forwarders`: peers whose requests are limited per forwarded wallet address; no other client can choose its key. Default empty (unchanged behaviour); set it to the frontend's address.
+- Concurrent requests registering the same client (the internal pre-authorized client on every credential offer, or a wallet running two flows at once) could see the client entry half-written and fail with "No registered redirect_uri" (500 at `/preauth`), or lose a redirect URI. `dynamic_registration` now runs under a lock, leaves a client untouched when its redirect URI is already registered, adds a new URI to a copy that replaces the entry in one step, and its `restore` takes back only the URI it added (`TestConcurrentRegistration`).
+- Concurrent token requests with one authorization or pre-authorized code could each get tokens. Fixed in the idpy-oidc fork (one redemption per code at a time); the pin moves to it below.
+
 ### Changed
+- The idpy-oidc fork pin moves to `6d99cc4`, which adds the code redemption lock.
 - The idpy-oidc fork pin moves to `b7da7c6`, the commit with the wallet attestation fixes (WIA signature always checked, PoP `aud` / `iss` / single-use `jti`, `sub` = `client_id`). The previous pin `3f3a5bd` predates them, so an image built from `requirements.txt` ran without them.
 - `pyjwt` 2.12.1 → 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
 - The listen address is configurable as `webserver.host` (default `0.0.0.0`, which containers need); it was hard-coded.

@@ -196,7 +196,14 @@ def init_rate_limits(app, settings=None):
         settings: ``rate_limiting`` configuration: ``enabled`` (default
             true), ``storage_uri`` (default ``memory://``),
             ``trusted_proxies`` (reverse proxies whose ``X-Forwarded-For``
-            is trusted; 1 behind nginx) and ``limits`` overrides.
+            is trusted; 1 behind nginx), ``forwarders`` and ``limits``
+            overrides.
+
+            ``forwarders`` lists the addresses of services that relay
+            wallet requests (the issuer frontend proxies PAR) and name the
+            wallet in ``X-Forwarded-For``. Their requests are limited per
+            wallet address; without this every relayed request shares the
+            frontend's limit. Only these peers can choose the key.
 
     Returns:
         The limiter, or ``None`` when disabled.
@@ -217,8 +224,20 @@ def init_rate_limits(app, settings=None):
         app.logger.warning(f"Rate limit exceeded: {limit.limit}")
         return jsonify({"error": "too_many_requests", "error_description": "Rate limit exceeded"}), 429
 
+    forwarders = frozenset(settings.get("forwarders") or ())
+
+    def client_address():
+        """Rate limit key: the wallet's address, also behind a forwarder."""
+        address = get_remote_address()
+        if address in forwarders:
+            # The entry the forwarder added: before those of trusted_proxies.
+            hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",") if h.strip()]
+            if len(hops) > proxies:
+                return hops[-(proxies + 1)]
+        return address
+
     limiter = Limiter(
-        get_remote_address,
+        client_address,
         app=app,
         storage_uri=settings.get("storage_uri", "memory://"),
         headers_enabled=True,

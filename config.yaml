@@ -46,6 +46,11 @@ rate_limiting:
   # Number of reverse proxies in front of this server whose X-Forwarded-For is
   # trusted (1 behind nginx). 0 when clients connect directly.
   trusted_proxies: 1
+  # Addresses (as seen after trusted_proxies) of services that relay wallet
+  # requests and name the wallet in X-Forwarded-For: the issuer frontend, which
+  # proxies PAR. Their requests are limited per wallet; without this, every
+  # relayed PAR shares one limit. Only these peers can choose the limit key.
+  forwarders: []
 
 # --- OpenID4VCI options -------------------------------------------------------
 # OpenID4VCI 1.0 RECOMMENDS these but does not require them. They are on by

@@ -1,3 +1,4 @@
+import secrets
 import datetime
 import logging
 import threading
@@ -423,19 +424,29 @@ class RequestManager:
         expiry = request_obj.preauth_expiry_time
         return expiry is not None and datetime.datetime.now(datetime.timezone.utc) >= expiry
 
-    def register_tx_code_failure(self, request_obj: Oid4vciSession) -> bool:
-        """Counts a wrong tx_code and revokes the code after too many.
+    def check_tx_code(self, request_obj: Oid4vciSession, candidate) -> str:
+        """Compares a tx_code and counts a wrong one, in one step.
+
+        Concurrent guesses all found the code before any revoked it, so more
+        than ``MAX_TX_CODE_ATTEMPTS`` could be compared. The comparison and the
+        count now happen under one lock, and a code that reached the limit is
+        never compared again.
 
         Returns:
-            True when the pre-authorized code was revoked.
+            ``"ok"``; ``"wrong"``; ``"revoked"`` (this guess reached the
+            limit); or ``"invalid"`` (the limit was already reached).
         """
         with self._requests_lock:
+            if request_obj.tx_code_failures >= MAX_TX_CODE_ATTEMPTS:
+                return "invalid"
+            if secrets.compare_digest(str(candidate), str(request_obj.tx_code)):
+                return "ok"
             request_obj.tx_code_failures += 1
             revoked = request_obj.tx_code_failures >= MAX_TX_CODE_ATTEMPTS
         if revoked:
             logger.warning(f"Too many wrong tx_code attempts for session_id {request_obj.session_id}; code revoked")
             self.revoke_preauth_code(request_obj)
-        return revoked
+        return "revoked" if revoked else "wrong"
 
     def revoke_preauth_code(self, request_obj: Oid4vciSession) -> None:
         """Makes a pre-authorized code unusable (it was redeemed or attacked)."""

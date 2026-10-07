@@ -3,6 +3,7 @@ import json
 import os
 import secrets
 import sys
+import threading
 import traceback
 from typing import Union
 from uuid import uuid4
@@ -354,6 +355,16 @@ def _registration_error(description):
     )
 
 
+#: Serialises client registrations. They read, change and write the shared
+#: client database; concurrent requests for one client could otherwise lose a
+#: redirect URI or read a half-written client entry.
+_registration_lock = threading.RLock()
+
+
+def _no_restore():
+    return None
+
+
 def dynamic_registration(client_id, redirect_uri, internal=False):
     """Registers ``redirect_uri`` for ``client_id`` before an authorization request.
 
@@ -361,50 +372,72 @@ def dynamic_registration(client_id, redirect_uri, internal=False):
     the ``preauth`` placeholder only for the server's own pre-authorized code
     request (``internal=True``).
 
+    A redirect URI the client already has changes nothing. A new one is added
+    to a copy of the client entry, which then replaces the entry in one
+    assignment, so concurrent requests never see it half-written. Only an
+    unknown client goes through the registration endpoint.
+
     Returns:
         ``(error_response, restore)``: an error response, or None; and a
-        function that puts the client entry back as it was, for when the
-        request that follows fails (an unauthenticated request must not
-        change a registered client).
+        function that takes back what this call added, for when the request
+        that follows fails (an unauthenticated request must not change a
+        registered client).
     """
     _context = current_app.server.get_context()
     if not client_id or not isinstance(client_id, str):
-        return _registration_error("client_id is required"), lambda: None
+        return _registration_error("client_id is required"), _no_restore
     if internal:
         if redirect_uri != PREAUTH_REDIRECT_URI:
-            return _registration_error("invalid redirect_uri"), lambda: None
+            return _registration_error("invalid redirect_uri"), _no_restore
     elif not valid_redirect_uri(redirect_uri):
         current_app.logger.warning("Rejected redirect_uri for client %s", redact(client_id))
-        return _registration_error("invalid redirect_uri"), lambda: None
+        return _registration_error("invalid redirect_uri"), _no_restore
 
-    had_entry = client_id in _context.cdb
-    previous = copy.deepcopy(_context.cdb[client_id]) if had_entry else None
+    registration = current_app.server.get_endpoint("registration")
+    try:
+        # The form the registration endpoint stores: (base, query).
+        new_uri = tuple(
+            registration.verify_redirect_uris({"application_type": "native", "redirect_uris": [redirect_uri]})[0]
+        )
+    except Exception:
+        return _registration_error("invalid redirect_uri"), _no_restore
+
+    def registered(entry):
+        return [tuple(uri) for uri in (entry or {}).get("redirect_uris", [])]
+
+    with _registration_lock:
+        entry = _context.cdb.get(client_id)
+        if entry is not None:
+            if new_uri in registered(entry):
+                return None, _no_restore
+            updated = copy.deepcopy(entry)
+            updated["redirect_uris"] = list(entry.get("redirect_uris", [])) + [new_uri]
+            _context.cdb[client_id] = updated
+            created = False
+        else:
+            try:
+                result = registration.process_request_authorization(client_id=client_id, redirect_uri=redirect_uri)
+                if isinstance(result, ResponseMessage) and "error" in result:
+                    raise ValueError(result.get("error_description") or result["error"])
+            except Exception as e:
+                current_app.logger.error(f"Error during client registration: {e}")
+                _context.cdb.pop(client_id, None)
+                return _registration_error("client registration failed"), _no_restore
+            created = True
 
     def restore():
-        if had_entry:
-            _context.cdb[client_id] = previous
-        else:
-            _context.cdb.pop(client_id, None)
+        with _registration_lock:
+            entry = _context.cdb.get(client_id)
+            if entry is None:
+                return
+            remaining = [uri for uri in entry.get("redirect_uris", []) if tuple(uri) != new_uri]
+            if created and not remaining:
+                _context.cdb.pop(client_id, None)
+            else:
+                updated = copy.deepcopy(entry)
+                updated["redirect_uris"] = remaining
+                _context.cdb[client_id] = updated
 
-    # process_request_authorization replaces the client's redirect_uris with only
-    # the new one, so keep the previous ones to not break in-flight sessions
-    previous_uris = list((previous or {}).get("redirect_uris", []))
-    try:
-        current_app.server.get_endpoint("registration").process_request_authorization(
-            client_id=client_id, redirect_uri=redirect_uri
-        )
-
-        _cinfo = _context.cdb[client_id]
-        merged_uris = list(_cinfo.get("redirect_uris", []))
-        for uri in previous_uris:
-            if uri not in merged_uris:
-                merged_uris.append(uri)
-        _cinfo["redirect_uris"] = merged_uris
-        _context.cdb[client_id] = _cinfo
-    except Exception as e:
-        current_app.logger.error(f"Error during client registration/update: {e}")
-        restore()
-        return _registration_error("client registration failed"), lambda: None
     return None, restore
 
 
@@ -842,13 +875,15 @@ def token():
 
         session_id = current_request.session_id
 
-        if not secrets.compare_digest(str(tx_code_from_request), str(current_request.tx_code)):
-            revoked = request_manager.register_tx_code_failure(current_request)
+        # Compared and counted in one step: concurrent guesses cannot exceed the limit.
+        tx_code_check = request_manager.check_tx_code(current_request, tx_code_from_request)
+        if tx_code_check != "ok":
             error_message = {
                 "error": "invalid_grant",
-                "description": "pre-authorized_code revoked after too many attempts"
-                if revoked
-                else "invalid tx_code",
+                "description": {
+                    "invalid": "invalid or expired pre-authorized_code",
+                    "revoked": "pre-authorized_code revoked after too many attempts",
+                }.get(tx_code_check, "invalid tx_code"),
             }
             return make_response(jsonify(error_message), 400)
 
