@@ -68,7 +68,7 @@ class TestSessionHandOff:
         stored = application.request_manager.get_request(session_id=query["session_id"])
         assert stored.issuer_state == "attacker-chosen"
 
-    def test_par_issuer_state_never_becomes_the_session_id(self, client):
+    def test_par_issuer_state_never_becomes_the_session_id(self, client, wia):
         response = client.post(
             "/pushed_authorization",
             data={
@@ -80,6 +80,7 @@ class TestSessionHandOff:
                 "code_challenge_method": "S256",
                 "issuer_state": "victim-session",
             },
+            headers=wia(),
         )
         assert response.status_code in (200, 201), response.data
         assert application.request_manager.get_request(session_id="victim-session") is None
@@ -106,6 +107,10 @@ class TestSessionHandOff:
 class TestPreAuthorizedCodes:
     """Anyone could mint pre-authorized codes; the 5-digit tx_code had no attempt limit."""
 
+    @pytest.fixture(autouse=True)
+    def _wallet(self, wia):
+        self.wia = wia
+
     def _generate(self, client, key=BACKEND_API_KEY):
         headers = {"X-Api-Key": key} if key else {}
         return client.post("/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers=headers)
@@ -130,6 +135,7 @@ class TestPreAuthorizedCodes:
                 "pre-authorized_code": code,
                 "tx_code": tx_code,
             },
+            headers=self.wia(),
         )
 
     def test_unknown_code_is_400_not_500(self, client):
@@ -199,6 +205,10 @@ def _jkt(key):
 class TestDpopBinding:
     """AUTH-VULN-07: DPoP-bound tokens were accepted as plain bearer tokens."""
 
+    @pytest.fixture(autouse=True)
+    def _wallet(self, wia):
+        self.wia = wia
+
     @pytest.fixture
     def key(self):
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -209,7 +219,7 @@ class TestDpopBinding:
         body = client.post(
             "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
         ).get_json()
-        headers = {"DPoP": proof if proof is not None else _dpop_proof(key)}
+        headers = {"DPoP": proof if proof is not None else _dpop_proof(key), **self.wia()}
         return client.post(
             "/token",
             data={
@@ -288,7 +298,7 @@ class TestLogRedaction:
             assert secret not in logged
         assert "authorization_code" in logged and "'user-agent': 'w'" in logged
 
-    def test_token_flow_logs_no_secrets(self, client, caplog):
+    def test_token_flow_logs_no_secrets(self, client, caplog, wia):
         import logging
 
         caplog.set_level(logging.DEBUG)
@@ -302,7 +312,120 @@ class TestLogRedaction:
                 "pre-authorized_code": body["preauth_code"],
                 "tx_code": str(body["tx_code"]),
             },
+            headers=wia(),
         ).get_json()
         text = caplog.text
         assert token["access_token"] not in text
         assert body["preauth_code"] not in text
+
+
+class TestParErrors:
+    def test_wia_for_another_client_is_a_client_error(self, client, monkeypatch):
+        """A rejected client authentication at PAR is returned, not turned into a 500."""
+        import views
+        from flask import make_response
+
+        monkeypatch.setattr(
+            views, "service_endpoint",
+            lambda endpoint, get_args=None, parse_kwargs=None: make_response(json.dumps({"error": "unauthorized_client"}), 401),
+        )
+        response = client.post(
+            "/pushed_authorization",
+            data={"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code"},
+        )
+        assert response.status_code == 401
+        assert json.loads(response.data)["error"] == "unauthorized_client"
+
+    def test_backend_only_endpoints_are_not_limited(self, app):
+        """/preauth_generate and /introspection come from the backend's single address."""
+        from security import init_rate_limits
+
+        init_rate_limits(app, {"limits": {"oidc_op.token": "3 per minute"}})
+        client = app.test_client()
+        codes = {
+            client.post("/preauth_generate", data={"scope": "x"}, headers={"X-Api-Key": BACKEND_API_KEY}).status_code
+            for _ in range(40)
+        }
+        assert 429 not in codes
+
+
+class TestWalletAttestationRequired:
+    """PAR and /token accepted any client_id without a Wallet Instance Attestation."""
+
+    PAR = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": "eu.europa.ec.eudi.pid_mdoc",
+        "code_challenge": CHALLENGE,
+        "code_challenge_method": "S256",
+    }
+
+    def _par(self, client, headers=None, **extra):
+        return client.post("/pushed_authorization", data={**self.PAR, **extra}, headers=headers or {})
+
+    def _auth_code(self, client):
+        mine = _authorize(client)
+        location = client.get(
+            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+        ).headers["Location"]
+        return parse_qs(urlsplit(location).query)["code"][0]
+
+    def _code_token(self, client, code, headers=None):
+        return client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "code_verifier": VERIFIER,
+            },
+            headers=headers or {},
+        )
+
+    def test_par_with_wia(self, client, wia):
+        assert self._par(client, wia()).status_code in (200, 201)
+
+    def test_par_without_wia(self, client):
+        response = self._par(client)
+        assert response.status_code == 401
+        assert json.loads(response.data)["error"] == "invalid_client"
+
+    def test_par_forged_wia(self, client, wia):
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        assert self._par(client, wia(signer=ec.generate_private_key(ec.SECP256R1()))).status_code == 401
+
+    def test_par_preauth_redirect_does_not_bypass_client_check(self, client, wia):
+        assert self._par(client, wia("another-wallet"), redirect_uri="preauth").status_code == 401
+
+    def test_par_pop_for_another_server(self, client, wia):
+        assert self._par(client, wia(pop_aud="https://other-as.test")).status_code == 401
+
+    def test_par_pop_replayed(self, client, wia):
+        headers = wia()
+        assert self._par(client, headers).status_code in (200, 201)
+        assert self._par(client, headers).status_code == 401
+
+    def test_authorization_code_token_with_wia(self, client, wia):
+        response = self._code_token(client, self._auth_code(client), wia())
+        assert response.status_code == 200, response.data
+
+    def test_authorization_code_token_without_wia(self, client):
+        response = self._code_token(client, self._auth_code(client))
+        assert response.status_code == 401
+
+    def test_preauthorized_token_without_wia(self, client):
+        body = client.post(
+            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+        ).get_json()
+        response = client.post(
+            "/token",
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+                "pre-authorized_code": body["preauth_code"],
+                "tx_code": str(body["tx_code"]),
+            },
+        )
+        assert response.status_code == 401

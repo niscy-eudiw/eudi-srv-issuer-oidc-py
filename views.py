@@ -30,6 +30,7 @@ import werkzeug
 
 from idpyoidc.server.exception import FailedAuthentication
 from idpyoidc.server.exception import ClientAuthenticationError
+from idpyoidc.server.exception import UnAuthorizedClient
 from idpyoidc.server.oidc.token import Token
 
 # logger = logging.getLogger(__name__)
@@ -570,6 +571,11 @@ def par_endpoint():
             description="An internal server error occurred while processing the request.",
         )
 
+    if response.status_code >= 400:
+        # Client authentication (e.g. the WIA) or request validation failed.
+        current_app.logger.warning(f"Session ID: {session_id}, Pushed Authorization Request rejected")
+        return response
+
     try:
         request_manager.add_request(
             client_id=client_id,
@@ -758,8 +764,12 @@ def token():
         # Make an internal request to the actual OIDC token endpoint via service_endpoint
         # We're simulating calling the OIDC provider's token endpoint directly
         # with the "authorization_code" grant type.
+        # The code belongs to the internal pre-authorized client, not to the
+        # wallet's client_id: its wallet attestation is still fully verified.
         response_obj = service_endpoint(
-            current_app.server.get_endpoint("token"), get_args=internal_payload
+            current_app.server.get_endpoint("token"),
+            get_args=internal_payload,
+            parse_kwargs={"skip_client_id_check": True},
         )
 
         response_data = response_obj.get_data()
@@ -880,8 +890,24 @@ def session_endpoint():
 IGNORE = ["cookie", "user-agent"]
 
 
-def service_endpoint(endpoint, get_args=None):
+def _client_authn_error(err):
+    """401 invalid_client: the client (its wallet attestation) did not authenticate."""
+    return make_response(
+        json.dumps({"error": "invalid_client", "error_description": str(err) or "client authentication failed"}),
+        401,
+        {"Content-Type": "application/json"},
+    )
+
+
+def service_endpoint(endpoint, get_args=None, parse_kwargs=None):
+    """Run an idpy-oidc endpoint on the current request.
+
+    :param get_args: request arguments to use instead of the request's own
+    :param parse_kwargs: extra arguments for parse_request, set only by this
+        server (e.g. skip_client_id_check for the internal pre-authorized call)
+    """
     _log = current_app.logger
+    parse_kwargs = parse_kwargs or {}
     _log.info('At the "{}" endpoint'.format(endpoint.name))
 
     http_info = {
@@ -899,15 +925,10 @@ def service_endpoint(endpoint, get_args=None):
         args_for_parsing = get_args if get_args is not None else request.args.to_dict()
 
         try:
-            req_args = endpoint.parse_request(args_for_parsing, http_info=http_info)
-        except ClientAuthenticationError as err:
+            req_args = endpoint.parse_request(args_for_parsing, http_info=http_info, **parse_kwargs)
+        except (ClientAuthenticationError, UnAuthorizedClient) as err:
             _log.error(err)
-            return make_response(
-                json.dumps(
-                    {"error": "unauthorized_client", "error_description": str(err)}
-                ),
-                401,
-            )
+            return _client_authn_error(err)
         except Exception as err:
             _log.error(err)
             return make_response(
@@ -927,7 +948,10 @@ def service_endpoint(endpoint, get_args=None):
                 else dict([(k, v) for k, v in request.form.items()])
             )
         try:
-            req_args = endpoint.parse_request(req_args, http_info=http_info)
+            req_args = endpoint.parse_request(req_args, http_info=http_info, **parse_kwargs)
+        except (ClientAuthenticationError, UnAuthorizedClient) as err:
+            _log.warning(f"Client authentication failed at {endpoint.name}: {err}")
+            return _client_authn_error(err)
         except Exception as err:
             _log.error(err)
             err_msg = ResponseMessage(

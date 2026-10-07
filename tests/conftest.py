@@ -1,16 +1,77 @@
 """Builds the authorization server from config.json with throw-away keys."""
 
+import base64
 import copy
+import datetime
 import json
 import os
 import sys
+import time
+import uuid
 
+import jwt as pyjwt
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 BACKEND_API_KEY = "k" * 40
+WALLET_CLIENT_ID = "wallet-test"
+
+
+def _self_signed(key, cn):
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .sign(key, hashes.SHA256())
+    )
+
+
+# Test wallet provider (a trusted attester) and the wallet instance key it attests
+WALLET_PROVIDER_KEY = ec.generate_private_key(ec.SECP256R1())
+WALLET_PROVIDER_CERT = _self_signed(WALLET_PROVIDER_KEY, "Test Wallet Provider")
+WALLET_INSTANCE_KEY = ec.generate_private_key(ec.SECP256R1())
+
+
+def make_wia_headers(aud, client_id=WALLET_CLIENT_ID, pop_aud=None, signer=None):
+    """OAuth-Client-Attestation (WIA) and -PoP headers from the test wallet."""
+    now = int(time.time())
+    instance_jwk = json.loads(pyjwt.algorithms.ECAlgorithm.to_jwk(WALLET_INSTANCE_KEY.public_key()))
+    x5c = [base64.b64encode(WALLET_PROVIDER_CERT.public_bytes(serialization.Encoding.DER)).decode()]
+    wia = pyjwt.encode(
+        {
+            "iss": "https://wallet-provider.test",
+            "sub": client_id,
+            "iat": now,
+            "exp": now + 3600,
+            "cnf": {"jwk": instance_jwk},
+            "wallet_name": "Test wallet",
+            "wallet_version": "1",
+            "wallet_solution_certification_information": "test",
+            "client_status": {"status": {"status_list": {"idx": 1, "uri": "https://status.test/1"}}, "exp": now + 86400},
+        },
+        signer or WALLET_PROVIDER_KEY,
+        algorithm="ES256",
+        headers={"typ": "oauth-client-attestation+jwt", "x5c": x5c},
+    )
+    pop = pyjwt.encode(
+        {"iss": client_id, "aud": pop_aud or aud, "jti": str(uuid.uuid4()), "iat": now},
+        WALLET_INSTANCE_KEY,
+        algorithm="ES256",
+        headers={"typ": "oauth-client-attestation-pop+jwt"},
+    )
+    return {"OAuth-Client-Attestation": wia, "OAuth-Client-Attestation-PoP": pop}
 
 
 def _test_config(tmp_path):
@@ -38,6 +99,15 @@ def _test_config(tmp_path):
         ],
         "read_only": False,
     }
+    # Wallet attestations are checked against a local trusted attester, no
+    # trust or status validator service.
+    attesters = tmp_path / "attesters"
+    attesters.mkdir()
+    (attesters / "wallet_provider.pem").write_bytes(WALLET_PROVIDER_CERT.public_bytes(serialization.Encoding.PEM))
+    token_kwargs = server_info["endpoint"]["token"]["kwargs"]
+    token_kwargs["trusted_attesters_path"] = str(attesters)
+    token_kwargs.pop("trust_validator_url", None)
+    token_kwargs.pop("status_validator_url", None)
     config["backend_api_key"] = BACKEND_API_KEY
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config))
@@ -69,3 +139,10 @@ def app(tmp_path):
 @pytest.fixture
 def client(app):
     return app.test_client()
+
+
+@pytest.fixture
+def wia(app):
+    """wia(client_id=..., **kw) -> WIA + PoP headers for this server."""
+    issuer = app.server.get_context().issuer
+    return lambda client_id=WALLET_CLIENT_ID, **kw: make_wia_headers(issuer, client_id, **kw)

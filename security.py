@@ -68,11 +68,12 @@ def backend_api_key_error():
     return None
 
 
-#: Default limit per client address for each endpoint. Introspection is not
-#: limited: all of it comes from the issuer backend's address.
+#: Default limit per client address for each endpoint. Introspection and
+#: /preauth_generate are not limited: only the issuer backend calls them (API
+#: key), from one address, so a per-address limit would cap all users together;
+#: the backend limits its own user-facing endpoints.
 ENDPOINT_LIMITS = {
     "oidc_op.token": "60 per minute",
-    "oidc_op.prea_auth": "30 per minute",
     "oidc_op.par_endpoint": "30 per minute",
     "oidc_op.authorization": "30 per minute",
     "oidc_op.verify_user": "30 per minute",

@@ -15,7 +15,7 @@ _06 Oct 2026_
 - `session_token` in the redirect to the issuer backend: an ES256 JWT with the session id, scope and authorization details, so the backend no longer trusts query parameters.
 - `backend_api_key` configuration: `/preauth_generate` and `/introspection` require it in the `X-Api-Key` header; anyone could mint pre-authorized codes.
 - DPoP binding: proofs at `/token` are checked (signature, `htm`, `htu`, `iat`, single-use `jti`), the access token is bound to the proof key, and `/introspection` returns `cnf.jkt`.
-- Per-client rate limits (`rate_limiting`, Flask-Limiter) on `/token`, `/preauth_generate`, `/pushed_authorization`, `/authorization` and `/verify/user`.
+- Per-client rate limits (`rate_limiting`, Flask-Limiter) on `/token`, `/pushed_authorization`, `/authorization` and `/verify/user` (not on the backend-only `/preauth_generate` and `/introspection`, where one address serves every user).
 - Test suite (`tests/`) and a CI workflow running it.
 
 ### Changed
@@ -30,8 +30,12 @@ _06 Oct 2026_
 - The Docker image runs as an unprivileged user (UID 10001) and only copies the application files.
 - CI: SonarCloud runs on `pull_request` instead of `pull_request_target` and actions are pinned to commit SHAs.
 - Removed the `/jwt_token` test route.
+- A Wallet Instance Attestation is required at `/pushed_authorization` and `/token`: `client_authn_method` is only `wallet_attestation`. The `public` method let any client skip the WIA (trust, revocation and proof-of-possession checks) by not sending it.
+- The internal pre-authorized code call skips the WIA `sub` / `client_id` comparison through a server-side flag; the fork no longer skips it for any request with `redirect_uri=preauth`.
 
 ### Fixed
 - Unknown authorization or pre-authorized codes and non-numeric `tx_code` values returned 500 instead of 400.
 - Codes, tokens, tx_codes and DPoP / authorization headers are redacted from logs, and `request_manager` logs through `logging` instead of `print`.
 - `check_session_iframe` compared the client id with the whole client database.
+- A pushed authorization request whose client authentication (e.g. the WIA) fails returns that error instead of a 500.
+- Client authentication failures at `/token` and `/pushed_authorization` return 401 `invalid_client` instead of 400.

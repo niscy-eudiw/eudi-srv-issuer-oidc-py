@@ -225,15 +225,7 @@
                     "path": "token",
                     "class": "idpyoidc.server.oidc.token.Token",
                     "kwargs": {
-                        "client_authn_method": [
-                            "client_secret_post",
-                            "client_secret_basic",
-                            "client_secret_jwt",
-                            "private_key_jwt",
-                            "public",
-                            "wallet_attestation",
-                            "dpop"
-                        ],
+                        "client_authn_method": ["wallet_attestation"],
                         "trusted_attesters_path": "/etc/eudiw/pid-issuer-dev/oidc_trusted_attesters",
                         "trust_validator_url": "https://trust-validator.eudiw.dev/trust",
                         "status_validator_url": "https://status-validator.issuer.eudiw.dev/status"
@@ -268,15 +260,7 @@
                     "path": "pushed_authorization",
                     "class": "idpyoidc.server.oauth2.pushed_authorization.PushedAuthorization",
                     "kwargs": {
-                        "client_authn_method": [
-                            "client_secret_post",
-                            "client_secret_basic",
-                            "client_secret_jwt",
-                            "private_key_jwt",
-                            "public",
-                            "wallet_attestation",
-                            "dpop"
-                        ]
+                        "client_authn_method": ["wallet_attestation"]
                     }
                 }
             },
