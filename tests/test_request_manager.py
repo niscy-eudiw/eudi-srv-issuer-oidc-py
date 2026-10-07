@@ -2,6 +2,7 @@
 
 import datetime
 import threading
+import time
 
 import pytest
 
@@ -67,6 +68,20 @@ def test_expired_requests_are_cleaned_without_an_authorization_request(monkeypat
     manager = RequestManager()
     manager.add_request("c", "https://w.test/cb", "code", session_id="old")
     _expire(manager, "old")
-    manager._last_clean = 0.0
+    # The last clean was one interval ago, whatever the host's uptime.
+    manager._last_clean = time.monotonic() - manager.CLEAN_INTERVAL
+    manager.add_request("c", "https://w.test/cb", "code", session_id="new")
+    assert "old" not in manager._requests
+
+
+def test_cleaning_does_not_depend_on_host_uptime(monkeypatch):
+    """time.monotonic() counts from boot: a host up for less than CLEAN_INTERVAL never cleaned."""
+    import request_manager
+
+    monkeypatch.setattr(request_manager.time, "monotonic", lambda: 5.0)  # 5 s after boot
+    manager = RequestManager()
+    manager.add_request("c", "https://w.test/cb", "code", session_id="old")
+    _expire(manager, "old")
+    manager._last_clean = float("-inf")
     manager.add_request("c", "https://w.test/cb", "code", session_id="new")
     assert "old" not in manager._requests

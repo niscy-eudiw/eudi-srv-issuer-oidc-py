@@ -201,7 +201,10 @@ class RequestManager:
         self.default_expiry_minutes = default_expiry_minutes
         # Requests are kept in memory: cap them so a flood cannot exhaust it.
         self.max_requests = max_requests
-        self._last_clean = 0.0
+        # Never cleaned yet: the first call is due. (0.0 was not: time.monotonic()
+        # counts from boot, so on a host up for less than CLEAN_INTERVAL nothing
+        # was cleaned.)
+        self._last_clean = float("-inf")
 
         # Create a separate lock for each dictionary to enable fine-grained locking.
         # This allows a thread to access one dictionary while another thread
