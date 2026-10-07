@@ -42,6 +42,12 @@ _06 Oct 2026_
 
 ## [Unreleased]
 
+### Security
+- Dependencies are installed from hash-locked files (`requirements.lock`, `requirements-dev.lock`, `requirements-build.lock`, `.github/semgrep-requirements.lock`, generated with pip-tools) with `--require-hashes --only-binary :all:`, in the Dockerfile and in CI: no unpinned indirect dependency and no setup script runs, except the idpy-oidc fork, now a commit archive with a pinned hash built with the locked setuptools. The builder image no longer needs compilers or git, and no step upgrades pip unpinned.
+- GitHub Actions: the Docker actions of `pipeline.yml` are pinned to full commit SHAs; every workflow has `permissions: {}` at workflow level and read-only permissions per job (`dependencycheck.yml` and `gitleaks.yml` had the default token permissions).
+- Log lines no longer contain the client's `client_id` (rejected redirect URI), `request_uri` (unknown request) or the form of an unsupported token request (SonarCloud log injection); `TestLogInjection`.
+- Removed `yaml_to_json.py` (unused since the configuration is YAML; it was copied into the image). `application.py` documents why the CSRF hotspot (S4502) is safe.
+
 ### Fixed
 - tx_code attempt limit under concurrency: a burst of wrong guesses all found the pre-authorized code before any revoked it, so more than 5 were compared (9 of 20 in a local test). `RequestManager.check_tx_code` compares and counts in one locked step and never compares a code that reached the limit; it replaces `register_tx_code_failure`.
 - PAR relayed by the issuer frontend shared one rate limit: the frontend names the wallet in `X-Forwarded-For`, but the server only trusted that header behind `trusted_proxies`, where any client could set it. New `rate_limiting.forwarders`: peers whose requests are limited per forwarded wallet address; no other client can choose its key. Default empty (unchanged behaviour); set it to the frontend's address.

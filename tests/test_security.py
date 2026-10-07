@@ -600,6 +600,23 @@ class TestClientRegistration:
         assert "Location" not in response.headers
 
 
+class TestLogInjection:
+    """Client-supplied values in log lines (SonarCloud log injection)."""
+
+    def test_client_values_are_not_logged(self, app, client, wia, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            TestWalletAttestationRequired()._par(client, wia(), redirect_uri="https://w.test/cb#\r\nFORGED-1")
+            client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:x\r\nFORGED-2"})
+            client.post("/token", data={"grant_type": "x\r\nFORGED-3"}, headers=_with_dpop())
+        # Values may appear escaped inside a logged (redacted) payload, but a
+        # line break from the client must never start a new log line.
+        for record in caplog.records:
+            message = record.getMessage()
+            assert "\nFORGED" not in message and "\rFORGED" not in message
+
+
 class TestConcurrentRegistration:
     """Concurrent registrations of one client (the internal pre-authorized
     client on every offer, a wallet running two flows) briefly left the client

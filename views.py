@@ -390,7 +390,8 @@ def dynamic_registration(client_id, redirect_uri, internal=False):
         if redirect_uri != PREAUTH_REDIRECT_URI:
             return _registration_error("invalid redirect_uri"), _no_restore
     elif not valid_redirect_uri(redirect_uri):
-        current_app.logger.warning("Rejected redirect_uri for client %s", redact(client_id))
+        # Nothing the client sent is logged (log injection).
+        current_app.logger.warning("Rejected a redirect_uri that is not a safe native-app URI")
         return _registration_error("invalid redirect_uri"), _no_restore
 
     registration = current_app.server.get_endpoint("registration")
@@ -458,9 +459,7 @@ def authorization():
         current_request = request_manager.get_request_by_uri(request_uri)
 
         if not current_request:
-            current_app.logger.warning(
-                f"Authorization Request: No matching request found for URI: {request_uri}"
-            )
+            current_app.logger.warning("Authorization Request: no pending request for the request_uri")
             abort(
                 404, "Not Found: No authorization request found for the provided URI."
             )
@@ -988,7 +987,7 @@ def token():
             "description": f"The grant type '{grant_type}' is not supported.",
         }
 
-        current_app.logger.info(f"Unsupported Token Request: {redact(request.form.to_dict())}")
+        current_app.logger.info("Token request with an unsupported grant_type")
         return make_response(jsonify(error_message), 400)
 
 

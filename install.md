@@ -57,9 +57,33 @@ To install [Flask](https://flask.palletsprojects.com/en/stable/), please follow 
 
 5. Install Flask and other dependencies in virtual environment
 
+    The lock files pin every package (including indirect ones) with its hash,
+    and only prebuilt wheels are installed. The idpy-oidc fork is the one
+    package built from source: a commit archive with a pinned hash, built with
+    the locked setuptools.
+
     ```shell
-    pip install -r requirements.txt
+    pip install --require-hashes --only-binary :all: -r requirements-build.lock
+    pip install --require-hashes --only-binary :all: --no-binary idpyoidc --no-build-isolation -r requirements.lock
     ```
+
+    Use `requirements-dev.lock` instead of `requirements.lock` to run the tests.
+
+    **Dependency locks.** Edit the direct dependencies in `requirements.txt`,
+    `requirements-dev.txt`, `requirements-build.txt` or
+    `.github/semgrep-requirements.txt`, then regenerate the matching lock with
+    pip-tools (Python 3.13), for example:
+
+    ```shell
+    pip install pip-tools
+    pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url \
+        -o requirements.lock requirements.txt
+    pip-compile --generate-hashes --allow-unsafe --strip-extras --no-emit-index-url \
+        -o requirements-dev.lock requirements-dev.txt
+    ```
+
+    To move the idpy-oidc fork to another commit, change the commit in the
+    archive URL in `requirements.txt` and regenerate both locks.
 
 6. Service Configuration
 

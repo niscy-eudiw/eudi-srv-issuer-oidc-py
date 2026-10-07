@@ -7,15 +7,14 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Read-only token; PRs from forks run without repository secrets.
-permissions:
-  contents: read
-  pull-requests: read
+# Read-only token, set per job; PRs from forks run without repository secrets.
+permissions: {}
 
 jobs:
   check_secret:
     name: Check secret presence
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Fail if SONAR_TOKEN is missing
         env:
@@ -33,6 +32,8 @@ jobs:
     needs: check_secret
     runs-on: ubuntu-latest
     if: (github.event_name == 'push'|| github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
     steps:
       - name: Checkout action
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -46,8 +47,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt pytest-cov
+          # Hash-locked, wheels only; the idpy-oidc fork (a commit archive) is the
+          # one package built, with the locked setuptools (requirements-build.lock).
+          pip install --require-hashes --only-binary :all: -r requirements-build.lock
+          pip install --require-hashes --only-binary :all: --no-binary idpyoidc --no-build-isolation -r requirements-dev.lock
       - name: Run tests and generate coverage.xml
         run: |
           pytest --cov=. --cov-report=xml:coverage.xml tests
@@ -73,6 +76,9 @@ jobs:
     needs: check_secret
     runs-on: ubuntu-latest
     if: (github.event_name == 'pull_request')
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout action
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -86,8 +92,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt pytest-cov
+          # Hash-locked, wheels only; the idpy-oidc fork (a commit archive) is the
+          # one package built, with the locked setuptools (requirements-build.lock).
+          pip install --require-hashes --only-binary :all: -r requirements-build.lock
+          pip install --require-hashes --only-binary :all: --no-binary idpyoidc --no-build-isolation -r requirements-dev.lock
       - name: Run tests and generate coverage.xml
         run: |
           pytest --cov=. --cov-report=xml:coverage.xml tests

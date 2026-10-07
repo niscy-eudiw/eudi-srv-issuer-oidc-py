@@ -5,10 +5,15 @@ name: Secret Scanning - Gitleaks
 on:
   push:
   workflow_dispatch:
-    
+
+# Read-only token, set per job (artifact upload needs no token permission).
+permissions: {}
+
 jobs:
   Secret-Scanning:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

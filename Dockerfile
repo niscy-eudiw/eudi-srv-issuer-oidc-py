@@ -3,18 +3,13 @@ FROM python:3.13-slim AS builder
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    libffi-dev \
-    libssl-dev \
-    ca-certificates \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Hash-locked dependencies, wheels only (nothing compiled, no setup scripts run),
+# except the idpy-oidc fork: a commit archive with a pinned hash, built with the
+# locked setuptools from requirements-build.lock.
+COPY requirements-build.lock requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: -r requirements-build.lock \
+ && pip install --no-cache-dir --require-hashes --only-binary :all: --no-binary idpyoidc \
+      --no-build-isolation --prefix=/install -r requirements.lock
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.13-slim

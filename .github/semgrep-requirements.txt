@@ -1,0 +1,2 @@
+# Semgrep for the tests workflow (installed from semgrep-requirements.lock).
+semgrep==1.179.0

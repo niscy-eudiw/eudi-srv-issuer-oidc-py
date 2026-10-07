@@ -31,6 +31,12 @@ def init_oidc_op(app):
 
 def oidc_provider_init_app(op_config, name=None, **kwargs):
     name = name or __name__
+    # No CSRF tokens, by design (SonarCloud S4502 reviewed as safe): no endpoint
+    # acts on a browser's ambient credentials. PAR, /token and /introspection
+    # are APIs authenticated by wallet attestation, DPoP or the backend's API
+    # key header; /authorization only starts a flow for a request_uri the
+    # wallet pushed; /verify/user needs a single-use token signed for that
+    # session by the issuer backend.
     app = Flask(name, static_url_path="", **kwargs)
     app.srv_config = op_config
 

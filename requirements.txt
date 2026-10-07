@@ -1,5 +1,8 @@
+# Direct runtime dependencies. Installs use the hash-locked requirements.lock,
+# generated from this file (see install.md, "Dependency locks").
 flask==3.1.3
 Flask-Limiter==4.1.1
-# niscy-eudiw fork (branch-refractoring), pinned to the commit the tests ran against.
-git+https://github.com/niscy-eudiw/idpy-oidc.git@6d99cc494e1b0f9485a43ef8f5b14dd70776bb14
+# niscy-eudiw fork (branch-refractoring), pinned to the commit the tests ran
+# against. A commit archive, not a git URL, so the lock files can hash it.
+idpyoidc @ https://github.com/niscy-eudiw/idpy-oidc/archive/6d99cc494e1b0f9485a43ef8f5b14dd70776bb14.tar.gz
 pyjwt==2.15.1
