@@ -49,6 +49,9 @@ _06 Oct 2026_
 - Removed `yaml_to_json.py` (unused since the configuration is YAML; it was copied into the image). `application.py` documents why the CSRF hotspot (S4502) is safe.
 
 ### Fixed
+- `python3 server.py -d <config>` crashed (`app.endpoint_context` does not exist); it prints the provider information from `app.server.get_context()` again.
+- Error redirects from `/verify/user` (`authentication_error_redirect`) now carry the authorization request's `state` (RFC 6749 4.1.2.1) and append to a `redirect_uri` that already has a query with `&`.
+- `views.py` reads the DPoP header with `request.headers.get()`; the reviewed CSRF finding in `application.py` is marked `# NOSONAR`.
 - Expired authorization requests were not cleaned during the first minute after the host booted: `RequestManager` compared `time.monotonic()` (seconds since boot) with a last-clean time of 0. It now starts at `-inf`, so the first call cleans. This also made `test_expired_requests_are_cleaned_without_an_authorization_request` fail on fresh CI runners.
 - tx_code attempt limit under concurrency: a burst of wrong guesses all found the pre-authorized code before any revoked it, so more than 5 were compared (9 of 20 in a local test). `RequestManager.check_tx_code` compares and counts in one locked step and never compares a code that reached the limit; it replaces `register_tx_code_failure`.
 - PAR relayed by the issuer frontend shared one rate limit: the frontend names the wallet in `X-Forwarded-For`, but the server only trusted that header behind `trusted_proxies`, where any client could set it. New `rate_limiting.forwarders`: peers whose requests are limited per forwarded wallet address; no other client can choose its key. Default empty (unchanged behaviour); set it to the frontend's address.
@@ -56,6 +59,8 @@ _06 Oct 2026_
 - Concurrent token requests with one authorization or pre-authorized code could each get tokens. Fixed in the idpy-oidc fork (one redemption per code at a time); the pin moves to it below.
 
 ### Changed
+- DPoP is validated and bound by the idpy-oidc fork's DPoP add-on only: `dpop.py` (a second validator, the access token -> key map and the `cnf.jkt` added at `/introspection`) is removed. The fork now does what it did: signature with a public asymmetric key and an allowed `alg`, `typ`, `htm`, `htu` against the configured `allowed_htu`, `iat` (5 minutes old, 60 s ahead), single-use `jti`; it binds the grant and its tokens to the key, refuses a refresh with another key or without a proof, and returns `cnf.jkt` from `/introspection`. Errors stay `400 invalid_dpop_proof`. `/token` keeps the `require_dpop` check (a proof must be present). `/token` now returns the token endpoint's error responses as they are (JSON). Needs the fork commit with these changes (see `requirements.txt`).
+- `server.create_app(config_file)` builds the application; `main()` and the tests use it (the tests copied the build steps before, so start-up was untested). Test coverage 70% -> 98% (304 tests): `tests/test_server.py`, `test_views.py`, `test_security_helpers.py` and more `test_request_manager.py`.
 - The idpy-oidc fork pin moves to `6d99cc4`, which adds the code redemption lock.
 - The idpy-oidc fork pin moves to `b7da7c6`, the commit with the wallet attestation fixes (WIA signature always checked, PoP `aud` / `iss` / single-use `jti`, `sub` = `client_id`). The previous pin `3f3a5bd` predates them, so an image built from `requirements.txt` ran without them.
 - `pyjwt` 2.12.1 → 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).

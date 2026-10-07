@@ -45,7 +45,6 @@ from security import (
     used_authn_tokens,
     valid_redirect_uri,
 )
-import dpop
 
 
 def _add_cookie(resp: Response, cookie_spec: Union[dict, list]):
@@ -147,17 +146,14 @@ def authentication_error_redirect(jws_token, error, error_description):
     if error_description is None:
         error_description = "invalid_request"
 
-    return redirect(
-        auth_args["return_uri"]
-        + "?"
-        + urllib.parse.urlencode(
-            {
-                "error": error,
-                "error_description": error_description,
-            }
-        ),
-        code=302,
-    )
+    params = {"error": error, "error_description": error_description}
+    # RFC 6749 4.1.2.1: the state of the authorization request comes back.
+    state = urllib.parse.parse_qs(auth_args.get("query") or "").get("state")
+    if state:
+        params["state"] = state[0]
+    return_uri = auth_args["return_uri"]
+    separator = "&" if urllib.parse.urlsplit(return_uri).query else "?"
+    return redirect(return_uri + separator + urllib.parse.urlencode(params), code=302)
 
 
 # Error redirection to the wallet during authentication without jws_token
@@ -739,35 +735,6 @@ def token():
     return service_endpoint(current_app.server.get_endpoint("token")) """
 
 
-def _allowed_htu():
-    """Public token endpoint URLs a DPoP proof may address (``allowed_htu``)."""
-    conf = current_app.server.get_context().conf.get("conf") or {}
-    return conf.get("add_ons", {}).get("dpop", {}).get("kwargs", {}).get("allowed_htu") or []
-
-
-def _bind_dpop(response_json, jkt, current_request):
-    """Binds the issued access token to the DPoP key, if a proof was sent.
-
-    Args:
-        response_json: Token response (updated: ``token_type`` becomes DPoP).
-        jkt: Thumbprint of the proof key, or None without a proof.
-        current_request: Issuance session.
-
-    Returns:
-        None, or an error response when a refresh changes the key.
-    """
-    bound = getattr(current_request, "dpop_jkt", None)
-    if bound and jkt != bound:
-        return make_response(
-            jsonify({"error": "invalid_dpop_proof", "error_description": "DPoP key differs from the bound key"}), 400
-        )
-    if jkt and "access_token" in response_json:
-        dpop.bindings.bind(response_json["access_token"], jkt, float(response_json.get("expires_in") or 3600))
-        current_request.dpop_jkt = jkt
-        response_json["token_type"] = "DPoP"
-    return None
-
-
 @oidc_op_views.route("/token", methods=["POST"])
 def token():
     req_args = dict([(k, v) for k, v in request.form.items()])
@@ -776,21 +743,16 @@ def token():
     response = None
 
     # A DPoP proof binds the tokens to the wallet key (RFC 9449). HAIP requires
-    # it: a bearer token would work for anyone who copies it.
-    jkt = None
-    if "DPoP" not in request.headers and getattr(current_app, "require_dpop", True):
+    # it: a bearer token would work for anyone who copies it. The proof itself
+    # (signature, typ, htm, htu, iat, single-use jti) is validated by the
+    # idpy-oidc DPoP add-on, which also binds the grant and its tokens to the
+    # key, refuses a refresh with another key and returns cnf.jkt at
+    # /introspection.
+    if request.headers.get("DPoP") is None and getattr(current_app, "require_dpop", True):
         current_app.logger.warning("Token request rejected: no DPoP proof")
         return make_response(
             jsonify({"error": "invalid_dpop_proof", "error_description": "A DPoP proof is required"}), 400
         )
-    if "DPoP" in request.headers:
-        try:
-            jkt = dpop.verify_proof(request.headers["DPoP"], request.method, _allowed_htu())
-        except dpop.DPoPError as e:
-            current_app.logger.warning(f"Token request rejected: {e}")
-            return make_response(
-                jsonify({"error": "invalid_dpop_proof", "error_description": "Invalid DPoP proof"}), 400
-            )
 
     if grant_type == "authorization_code":
         code = req_args.get("code")
@@ -814,15 +776,12 @@ def token():
         response_data = response_obj.get_data()
 
         if response_obj.status_code != 200:
-            return make_response(response_data, response_obj.status_code)
+            # The endpoint's own response: a JSON error keeps its Content-Type.
+            return response_obj
 
         response_json = json.loads(response_data)
 
         current_app.logger.info(f", Session ID: {session_id}, Token Response issued")
-
-        binding_error = _bind_dpop(response_json, jkt, current_request)
-        if binding_error is not None:
-            return binding_error
 
         if "access_token" in response_json:
             request_manager.update_access_token(
@@ -909,16 +868,13 @@ def token():
         response_data = response_obj.get_data()
 
         if response_obj.status_code != 200:
-            return make_response(response_data, response_obj.status_code)
+            # The endpoint's own response: a JSON error keeps its Content-Type.
+            return response_obj
 
         response_json = json.loads(response_data)  # Ensure it's JSON from get_data()
 
         request_manager.revoke_preauth_code(current_request)
         current_app.logger.info(f", Session ID: {session_id}, Pre-Authorized Token Response issued")
-
-        binding_error = _bind_dpop(response_json, jkt, current_request)
-        if binding_error is not None:
-            return binding_error
 
         if "access_token" in response_json:
             request_manager.update_access_token(
@@ -958,13 +914,10 @@ def token():
         response_data = response_obj.get_data()
 
         if response_obj.status_code != 200:
-            return make_response(response_data, response_obj.status_code)
+            # The endpoint's own response: a JSON error keeps its Content-Type.
+            return response_obj
 
         response_json = json.loads(response_data)
-
-        binding_error = _bind_dpop(response_json, jkt, current_request)
-        if binding_error is not None:
-            return binding_error
 
         if "access_token" in response_json:
             request_manager.update_access_token(
@@ -1001,11 +954,9 @@ def introspection_endpoint():
     response = service_endpoint(current_app.server.get_endpoint("introspection"))
     if response.status_code != 200:
         return response
+    # A DPoP-bound token's introspection carries cnf.jkt (RFC 9449 section
+    # 6.2), set by idpy-oidc: the issuer backend then requires a proof by that key.
     body = json.loads(response.get_data(as_text=True))
-    jkt = dpop.bindings.jkt(request.form.get("token", ""))
-    if body.get("active") and jkt:
-        # RFC 9449 section 6.2: the resource server checks the proof key.
-        body["cnf"] = {"jkt": jkt}
     result = make_response(jsonify(body), 200)
     result.headers["Cache-Control"] = "no-store"
     return result

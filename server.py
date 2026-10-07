@@ -52,8 +52,17 @@ logger = logging.getLogger(__name__)
 #         return environ
 
 
-def main(config_file, args):
-    logging.basicConfig(level=logging.INFO)
+def create_app(config_file: str):
+    """Builds the authorization server from a configuration file.
+
+    Args:
+        config_file: Path of the configuration (YAML or JSON).
+
+    Returns:
+        ``(app, config)``: the Flask application, ready to serve, and the
+        loaded configuration (``config.web_conf`` holds the web server
+        settings).
+    """
     config = create_from_config_file(
         Configuration,
         entity_conf=[
@@ -78,13 +87,19 @@ def main(config_file, args):
     # Wallet attestation (WIA) at PAR and /token, unless this is false.
     app.require_wallet_attestation = getattr(config, "require_wallet_attestation", True) is not False
     configure_client_authentication(app, app.require_wallet_attestation)
+    return app, config
+
+
+def main(config_file, args):
+    logging.basicConfig(level=logging.INFO)
+    app, config = create_app(config_file)
 
     web_conf = config.web_conf
 
     context = create_context(dir_path, web_conf)
 
     if args.display:
-        print(json.dumps(app.endpoint_context.provider_info, indent=4, sort_keys=True))
+        print(json.dumps(app.server.get_context().provider_info, indent=4, sort_keys=True))
         exit(0)
 
     kwargs = {}

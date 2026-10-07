@@ -36,8 +36,8 @@ def oidc_provider_init_app(op_config, name=None, **kwargs):
     # are APIs authenticated by wallet attestation, DPoP or the backend's API
     # key header; /authorization only starts a flow for a request_uri the
     # wallet pushed; /verify/user needs a single-use token signed for that
-    # session by the issuer backend.
-    app = Flask(name, static_url_path="", **kwargs)
+    # session by the issuer backend. Reviewed: suppressed below (NOSONAR).
+    app = Flask(name, static_url_path="", **kwargs)  # NOSONAR - CSRF not applicable, see above
     app.srv_config = op_config
 
     try:

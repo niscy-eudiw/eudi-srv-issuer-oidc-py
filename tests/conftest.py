@@ -110,6 +110,9 @@ def _test_config(tmp_path):
     token_kwargs.pop("trust_validator_url", None)
     token_kwargs.pop("status_validator_url", None)
     config["backend_api_key"] = BACKEND_API_KEY
+    config["authorization_redirect_url"] = "https://backend.test/auth_choice"
+    # Tests that need rate limits apply them themselves (init_rate_limits).
+    config["rate_limiting"] = {"enabled": False}
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config))
     return str(path)
@@ -117,30 +120,13 @@ def _test_config(tmp_path):
 
 @pytest.fixture
 def app(tmp_path):
-    from idpyoidc.configure import Configuration, create_from_config_file
-    from idpyoidc.server.configure import OPConfiguration
-
+    """The server as server.main builds it (server.create_app), from the test configuration."""
     import application
-    from application import oidc_provider_init_app
+    import server
 
     application.request_manager.__init__(default_expiry_minutes=1450)
-    config = create_from_config_file(
-        Configuration,
-        entity_conf=[{"class": OPConfiguration, "attr": "op", "path": ["op", "server_info"]}],
-        filename=_test_config(tmp_path),
-        base_path=ROOT,
-    )
-    app = oidc_provider_init_app(config.op, "oidc_op")
+    app, _ = server.create_app(_test_config(tmp_path))
     app.config["TESTING"] = True
-    app.authorization_redirect_url = "https://backend.test/auth_choice"
-    app.backend_api_key = getattr(config, "backend_api_key", None)
-    # As server.py does: the OpenID4VCI switches, all on in config.yaml.
-    from security import configure_client_authentication
-
-    app.require_pushed_authorization_requests = getattr(config, "require_pushed_authorization_requests", True)
-    app.require_dpop = getattr(config, "require_dpop", True)
-    app.require_wallet_attestation = getattr(config, "require_wallet_attestation", True)
-    configure_client_authentication(app, app.require_wallet_attestation)
     return app
 
 

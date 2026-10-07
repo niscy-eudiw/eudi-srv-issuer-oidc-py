@@ -47,8 +47,6 @@ class Oid4vciSession:
         tx_code_failures (int): Wrong tx_code attempts so far.
         preauth_expiry_time (Optional[datetime.datetime]): When the
             pre-authorized code stops being redeemable.
-        dpop_jkt (Optional[str]): Thumbprint of the DPoP key the tokens are
-            bound to; refreshes must use the same key.
     """
 
     def __init__(
@@ -95,7 +93,6 @@ class Oid4vciSession:
         self.issuer_state = issuer_state
         self.tx_code_failures = 0
         self.preauth_expiry_time: Optional[datetime.datetime] = None
-        self.dpop_jkt: Optional[str] = None
 
     def to_dict(self) -> Dict:
         """Converts the Oid4vciRequest object into a dictionary."""
