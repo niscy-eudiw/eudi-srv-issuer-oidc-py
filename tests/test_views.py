@@ -624,16 +624,29 @@ class TestDiscoveryAndStatic:
     def test_index(self, client):
         assert client.get("/").status_code == 200
 
-    def test_static_file(self, client):
-        response = client.get("/static/jwks.json")
+    @pytest.fixture
+    def published_jwks(self, app):
+        """A JWKS file in static/ (the real one is generated at start-up and not in git)."""
+        import os
+        import uuid
+
+        name = f"test-{uuid.uuid4().hex}.json"
+        path = os.path.join(app.root_path, "static", name)
+        with open(path, "w") as f:
+            json.dump({"keys": []}, f)
+        yield name
+        os.remove(path)
+
+    def test_static_file(self, client, published_jwks):
+        response = client.get(f"/static/{published_jwks}")
         assert response.status_code == 200
         assert "keys" in json.loads(response.data)
 
     def test_static_path_traversal_refused(self, client):
         assert client.get("/static/../config.yaml").status_code == 404
 
-    def test_keys_serves_published_jwks(self, client):
-        response = client.get("/keys/jwks.json")
+    def test_keys_serves_published_jwks(self, client, published_jwks):
+        response = client.get(f"/keys/{published_jwks}")
         assert response.status_code == 200
         assert response.mimetype == "application/json"
         assert "keys" in response.get_json()
