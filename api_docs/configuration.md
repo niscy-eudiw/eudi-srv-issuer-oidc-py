@@ -4,7 +4,7 @@ For configuring your locally installed version of the EUDIW Issuer Authorization
 
 ## 1. Service Configuration
 
-Base configuration for the EUDIW Issuer Authorization server is located in ```config.json``.
+Base configuration for the EUDIW Issuer Authorization server is located in `config.yaml`, where every setting is commented. A JSON file with the same keys also works.
 
 Parameters that should be changed:
 
@@ -18,6 +18,21 @@ Parameters that should be changed:
 - `trusted_attesters_path` WIA trust validation by pem certificate files path
 
 trust_validator_url and trusted_attesters_path should not be used at the same time.
+
+### OpenID4VCI options
+
+OpenID4VCI 1.0 RECOMMENDS these features but does not require them. They are on by default; switch one off only to test wallets that do not support it. A feature that is switched off but used anyway is still fully checked (for example a wallet attestation that is sent is verified, and a `plain` PKCE challenge is refused).
+
+| Setting | Default | When `false` |
+|---|---|---|
+| `require_pushed_authorization_requests` | `true` | Plain `/authorization` requests are accepted (the redirect URI is still checked). |
+| `op.server_info.add_ons.pkce.kwargs.essential` | `true` | Requests without `code_challenge` are accepted. `code_challenge_methods` lists the accepted methods (`S256`). |
+| `require_dpop` | `true` | `/token` issues bearer tokens to requests without a DPoP proof. |
+| `require_wallet_attestation` | `true` | Wallets may also authenticate as public clients at PAR and `/token`. |
+
+`/.well-known/openid-configuration` reports the values in force (`require_pushed_authorization_requests`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`).
+
+The listen address of the built-in server is `webserver.host` (`0.0.0.0` in containers, `127.0.0.1` for a local run).
 
 ## 2. Session hand-off to the issuer backend
 

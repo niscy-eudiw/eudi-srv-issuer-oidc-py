@@ -44,4 +44,6 @@ USER issuer
 
 EXPOSE 5000
 
-CMD ["python3", "server.py", "/etc/issuer_config/authorization_config.json"]
+# Mount the configuration here (YAML; a .json file with the same keys also works
+# if you change this path).
+CMD ["python3", "server.py", "/etc/issuer_config/authorization_config.yaml"]

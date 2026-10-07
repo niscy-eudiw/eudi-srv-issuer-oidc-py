@@ -39,3 +39,26 @@ _06 Oct 2026_
 - `check_session_iframe` compared the client id with the whole client database.
 - A pushed authorization request whose client authentication (e.g. the WIA) fails returns that error instead of a 500.
 - Client authentication failures at `/token` and `/pushed_authorization` return 401 `invalid_client` instead of 400.
+
+## [Unreleased]
+
+### Changed
+- The idpy-oidc fork pin moves to `b7da7c6`, the commit with the wallet attestation fixes (WIA signature always checked, PoP `aud` / `iss` / single-use `jti`, `sub` = `client_id`). The previous pin `3f3a5bd` predates them, so an image built from `requirements.txt` ran without them.
+- `pyjwt` 2.12.1 → 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
+- The listen address is configurable as `webserver.host` (default `0.0.0.0`, which containers need); it was hard-coded.
+- PKCE is required by default, with `S256` only, at `/pushed_authorization` and `/authorization`: the add-on option was misspelt (`code_challenge_method`), so PKCE was optional and `plain` was accepted. `add_ons.pkce.kwargs.essential: false` makes it optional again (OpenID4VCI only recommends it); a challenge that is sent must still use an accepted method. The server's own pre-authorized code request skips it.
+- Authorization requests must be pushed by default (`require_pushed_authorization_requests: true`; OpenID4VCI recommends PAR, HAIP requires it): the plain `/authorization` request registered any `client_id` and `redirect_uri` before any client authentication. Set it to `false` to test wallets without PAR.
+- Redirect URIs must be `https`, `http` on a loopback address, or a reverse-domain private-use scheme (RFC 8252), without a fragment; `preauth` is reserved for the server's own pre-authorized code request. A pushed request whose client authentication fails leaves the client entry as it was.
+- `/token` requires a DPoP proof by default (`require_dpop: true`); tokens were issued as bearer tokens without one. `false` allows bearer tokens again.
+- `require_wallet_attestation` (default `true`): `false` lets wallets authenticate as public clients at PAR and `/token`; a wallet attestation that is sent is still verified.
+- `/.well-known/openid-configuration` reports the values in force: `require_pushed_authorization_requests`, `code_challenge_methods_supported`, `token_endpoint_auth_methods_supported`.
+- The configuration example is now `config.yaml`, with a comment on every setting (`config.json` is removed; JSON files with the same keys still load). The Docker image reads `/etc/issuer_config/authorization_config.yaml`: rename the mounted file, or point the command at your `.json` file.
+- The token handed through `/verify/user` expires (`token_lifetime`, default 30 minutes), is accepted only from this server (`iss`, signing algorithm) and only once.
+- The access token's `client_status` comes from the wallet attestation verified in that request, not from the shared client entry.
+- Removed `/registration`, `/registration_api` (open client registration that fetched remote `jwks_uri` / `sector_identifier_uri`), `/userinfo`, `/session`, `/check_session_iframe`, `/verify_logout`, `/rp_logout` and `/post_logout` with their endpoints and templates; the discovery document no longer lists them and states `require_pushed_authorization_requests`.
+
+### Fixed
+- Authorization errors redirected to any `redirect_uri` the request named (open redirect): they go only to a URI registered for the client, otherwise as JSON.
+- A lock-order inversion in `request_manager` could deadlock a lookup of an expired request against the clean-up. Expired requests are now also cleaned up when requests are added (not only on `/authorization`), and the store is capped (`RequestLimitExceeded`).
+- `/keys/<file>` answered 500 for a missing file; it serves only `.json` files.
+- The unsupported grant type branch logged the token request form unredacted.

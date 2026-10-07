@@ -1,15 +1,14 @@
+import copy
 import json
 import os
 import secrets
 import sys
 import traceback
 from typing import Union
-from urllib.parse import urlparse
 from uuid import uuid4
 
 import requests
 
-from cryptojwt import as_unicode
 from cryptojwt.exception import VerificationError
 from flask import Blueprint
 from flask import Response
@@ -37,7 +36,14 @@ from idpyoidc.server.oidc.token import Token
 
 oidc_op_views = Blueprint("oidc_op", __name__, url_prefix="")
 from application import request_manager
-from security import backend_api_key_error, redact, session_token
+from security import (
+    PREAUTH_REDIRECT_URI,
+    backend_api_key_error,
+    redact,
+    session_token,
+    used_authn_tokens,
+    valid_redirect_uri,
+)
 import dpop
 
 
@@ -65,8 +71,11 @@ def send_js(path):
 
 @oidc_op_views.route("/keys/<jwks>")
 def keys(jwks):
-    fname = os.path.join("static", jwks)
-    return open(fname).read()
+    # Only the published JWKS files; send_from_directory refuses paths that
+    # leave the folder and answers 404 for a missing file (was a 500).
+    if not jwks.endswith(".json"):
+        abort(404)
+    return send_from_directory("static", jwks, mimetype="application/json")
 
 
 @oidc_op_views.route("/")
@@ -151,19 +160,27 @@ def authentication_error_redirect(jws_token, error, error_description):
 
 
 # Error redirection to the wallet during authentication without jws_token
-def auth_error_redirect(return_uri, error, error_description=None):
+def auth_error_redirect(return_uri, error, error_description=None, client_id=None):
+    """Sends an OAuth error to the client's redirect URI.
 
-    error_msg = {
-        "error": error,
-    }
-
+    Redirects only to a URI registered for ``client_id`` (RFC 6749 4.1.2.1);
+    otherwise answers with the error as JSON, so the endpoint cannot be used
+    to send a browser anywhere (open redirect).
+    """
+    error_msg = {"error": error}
     if error_description is not None:
         error_msg["error_description"] = error_description
 
-    return redirect(
-        return_uri + "?" + urllib.parse.urlencode(error_msg),
-        code=302,
-    )
+    registered = []
+    if client_id:
+        registered = current_app.server.get_context().cdb.get(client_id, {}).get("redirect_uris", [])
+        registered = [uri[0] if isinstance(uri, (list, tuple)) else uri for uri in registered]
+    if return_uri and return_uri in registered and valid_redirect_uri(return_uri):
+        separator = "&" if urllib.parse.urlsplit(return_uri).query else "?"
+        return redirect(return_uri + separator + urllib.parse.urlencode(error_msg), code=302)
+
+    status = 500 if error == "server_error" else 400
+    return make_response(json.dumps(error_msg), status, {"Content-Type": "application/json"})
 
 
 def _session_matches_request(session_id, authz_request) -> bool:
@@ -231,6 +248,18 @@ def verify(authn_method):
             400,
         )
 
+    # One code per authentication: the token cannot be redeemed again.
+    if not used_authn_tokens.first_use(
+        request.args.get("token", ""), getattr(authn_method, "token_lifetime", 1800)
+    ):
+        current_app.logger.warning(
+            f"Authorization verification: token already used for session {username}"
+        )
+        return make_response(
+            json.dumps({"error": "invalid_request", "error_description": "Token already used"}),
+            400,
+        )
+
     endpoint = current_app.server.get_endpoint("authorization")
 
     _session_id = endpoint.create_session(
@@ -280,10 +309,34 @@ def verify_user():
         return render_template("error.html", title=str(exc))
 
 
+#: Metadata names (RFC 8414 registry) of the client authentication methods.
+_AUTH_METHOD_NAMES = {"wallet_attestation": "attest_jwt_client_auth", "public": "none", "none": "none"}
+
+
+def _discovery_document() -> dict:
+    """The static ``openid-configuration.json`` with the values the
+    configuration decides (PAR, PKCE, client authentication) filled in, so
+    wallets see what this server actually requires."""
+    with open(os.path.join(current_app.root_path, "openid-configuration.json"), encoding="utf-8") as f:
+        document = json.load(f)
+    context = current_app.server.get_context()
+    document["require_pushed_authorization_requests"] = bool(
+        getattr(current_app, "require_pushed_authorization_requests", True)
+    )
+    pkce = getattr(context, "add_on", {}).get("pkce")
+    if pkce:
+        document["code_challenge_methods_supported"] = list(pkce["code_challenge_methods"])
+    token_endpoint = current_app.server.get_endpoint("token")
+    if token_endpoint is not None and token_endpoint.client_authn_method:
+        names = [_AUTH_METHOD_NAMES.get(m, m) for m in token_endpoint.client_authn_method]
+        document["token_endpoint_auth_methods_supported"] = list(dict.fromkeys(names))
+    return document
+
+
 @oidc_op_views.route("/.well-known/<service>")
 def well_known(service):
     if service == "openid-configuration" or service == "oauth-authorization-server":
-        return send_from_directory(current_app.root_path, "openid-configuration.json")
+        return jsonify(_discovery_document())
     elif service == "webfinger":
         _endpoint = current_app.server.get_endpoint("discovery")
     else:
@@ -292,24 +345,50 @@ def well_known(service):
     return service_endpoint(_endpoint)
 
 
-@oidc_op_views.route("/registration", methods=["GET", "POST"])
-def registration():
-    return service_endpoint(current_app.server.get_endpoint("registration"))
+def _registration_error(description):
+    """400 ``invalid_request`` as JSON: never redirect to an unchecked URI."""
+    return make_response(
+        json.dumps({"error": "invalid_request", "error_description": description}),
+        400,
+        {"Content-Type": "application/json"},
+    )
 
 
-@oidc_op_views.route("/registration_api", methods=["GET", "DELETE"])
-def registration_api():
-    if request.method == "DELETE":
-        return service_endpoint(current_app.server.get_endpoint("registration_delete"))
-    else:
-        return service_endpoint(current_app.server.get_endpoint("registration_read"))
+def dynamic_registration(client_id, redirect_uri, internal=False):
+    """Registers ``redirect_uri`` for ``client_id`` before an authorization request.
 
+    Only RFC 8252 redirect URIs are accepted (``security.valid_redirect_uri``);
+    the ``preauth`` placeholder only for the server's own pre-authorized code
+    request (``internal=True``).
 
-def dynamic_registration(client_id, redirect_uri):
+    Returns:
+        ``(error_response, restore)``: an error response, or None; and a
+        function that puts the client entry back as it was, for when the
+        request that follows fails (an unauthenticated request must not
+        change a registered client).
+    """
     _context = current_app.server.get_context()
+    if not client_id or not isinstance(client_id, str):
+        return _registration_error("client_id is required"), lambda: None
+    if internal:
+        if redirect_uri != PREAUTH_REDIRECT_URI:
+            return _registration_error("invalid redirect_uri"), lambda: None
+    elif not valid_redirect_uri(redirect_uri):
+        current_app.logger.warning("Rejected redirect_uri for client %s", redact(client_id))
+        return _registration_error("invalid redirect_uri"), lambda: None
+
+    had_entry = client_id in _context.cdb
+    previous = copy.deepcopy(_context.cdb[client_id]) if had_entry else None
+
+    def restore():
+        if had_entry:
+            _context.cdb[client_id] = previous
+        else:
+            _context.cdb.pop(client_id, None)
+
     # process_request_authorization replaces the client's redirect_uris with only
     # the new one, so keep the previous ones to not break in-flight sessions
-    previous_uris = list(_context.cdb.get(client_id, {}).get("redirect_uris", []))
+    previous_uris = list((previous or {}).get("redirect_uris", []))
     try:
         current_app.server.get_endpoint("registration").process_request_authorization(
             client_id=client_id, redirect_uri=redirect_uri
@@ -323,12 +402,10 @@ def dynamic_registration(client_id, redirect_uri):
         _cinfo["redirect_uris"] = merged_uris
         _context.cdb[client_id] = _cinfo
     except Exception as e:
-        current_app.logger.error(
-            f"Error during client registration/update in traditional flow: {e}"
-        )
-        return auth_error_redirect(
-            redirect_uri, "server_error", "client_registration_failed"
-        )
+        current_app.logger.error(f"Error during client registration/update: {e}")
+        restore()
+        return _registration_error("client registration failed"), lambda: None
+    return None, restore
 
 
 @oidc_op_views.route("/authorization")
@@ -397,6 +474,11 @@ def authorization():
             )
 
     else:
+        # HAIP requires PAR: only a pushed request has its client (WIA)
+        # authenticated before the user is involved.
+        if getattr(current_app, "require_pushed_authorization_requests", True):
+            return _registration_error("a pushed authorization request (request_uri) is required")
+
         session_id = str(uuid4())
 
         current_app.logger.info(
@@ -426,7 +508,11 @@ def authorization():
             current_app.logger.error(f"Authorization request error: {e}")
             return make_response("Authorization request invalid parameters", 400)
 
-        dynamic_registration(client_id=client_id, redirect_uri=redirect_uri)
+        registration_error, _ = dynamic_registration(
+            client_id=client_id, redirect_uri=redirect_uri
+        )
+        if registration_error is not None:
+            return registration_error
 
         try:
             request_manager.add_request(
@@ -510,6 +596,7 @@ def authorization():
             authorization_args.get("redirect_uri"),
             "server_error",
             "internal_service_unavailable",
+            client_id=authorization_args.get("client_id"),
         )
     except Exception as e:
         current_app.logger.error(
@@ -519,6 +606,7 @@ def authorization():
             authorization_args.get("redirect_uri"),
             "server_error",
             "unhandled_exception",
+            client_id=authorization_args.get("client_id"),
         )
 
 
@@ -557,12 +645,17 @@ def par_endpoint():
         except json.JSONDecodeError:
             return jsonify({"error": "Invalid authorization_details JSON"}), 400
 
-    dynamic_registration(client_id=client_id, redirect_uri=redirect_uri)
+    registration_error, restore_client = dynamic_registration(
+        client_id=client_id, redirect_uri=redirect_uri
+    )
+    if registration_error is not None:
+        return registration_error
     try:
         response = service_endpoint(
             current_app.server.get_endpoint("pushed_authorization")
         )
     except Exception as e:
+        restore_client()
         current_app.logger.error(
             f"Error accessing pushed_authorization endpoint: {e}", exc_info=True
         )
@@ -573,6 +666,7 @@ def par_endpoint():
 
     if response.status_code >= 400:
         # Client authentication (e.g. the WIA) or request validation failed.
+        restore_client()
         current_app.logger.warning(f"Session ID: {session_id}, Pushed Authorization Request rejected")
         return response
 
@@ -649,8 +743,14 @@ def token():
     grant_type = req_args.get("grant_type")
     response = None
 
-    # A DPoP proof binds the tokens to the wallet key (RFC 9449).
+    # A DPoP proof binds the tokens to the wallet key (RFC 9449). HAIP requires
+    # it: a bearer token would work for anyone who copies it.
     jkt = None
+    if "DPoP" not in request.headers and getattr(current_app, "require_dpop", True):
+        current_app.logger.warning("Token request rejected: no DPoP proof")
+        return make_response(
+            jsonify({"error": "invalid_dpop_proof", "error_description": "A DPoP proof is required"}), 400
+        )
     if "DPoP" in request.headers:
         try:
             jkt = dpop.verify_proof(request.headers["DPoP"], request.method, _allowed_htu())
@@ -853,7 +953,7 @@ def token():
             "description": f"The grant type '{grant_type}' is not supported.",
         }
 
-        current_app.logger.info(f"Unsupported Token Request: {request.form.to_dict()}")
+        current_app.logger.info(f"Unsupported Token Request: {redact(request.form.to_dict())}")
         return make_response(jsonify(error_message), 400)
 
 
@@ -875,16 +975,6 @@ def introspection_endpoint():
     result = make_response(jsonify(body), 200)
     result.headers["Cache-Control"] = "no-store"
     return result
-
-
-@oidc_op_views.route("/userinfo", methods=["GET", "POST"])
-def userinfo():
-    return service_endpoint(current_app.server.get_endpoint("userinfo"))
-
-
-@oidc_op_views.route("/session", methods=["GET"])
-def session_endpoint():
-    return service_endpoint(current_app.server.get_endpoint("session"))
 
 
 IGNORE = ["cookie", "user-agent"]
@@ -1000,81 +1090,6 @@ def handle_bad_request(e):
     return "bad request!", 400
 
 
-@oidc_op_views.route("/check_session_iframe", methods=["GET", "POST"])
-def check_session_iframe():
-    if request.method == "GET":
-        req_args = request.args.to_dict()
-    else:
-        if request.data:
-            req_args = json.loads(as_unicode(request.data))
-        else:
-            req_args = dict([(k, v) for k, v in request.form.items()])
-
-    if req_args:
-        _context = current_app.server.get_context()
-        # will contain client_id and origin
-        if req_args["origin"] != _context.issuer:
-            return "error"
-        if req_args["client_id"] not in _context.cdb:
-            return "error"
-        return "OK"
-
-    current_app.logger.debug("check_session_iframe: {}".format(req_args))
-    doc = open("templates/check_session_iframe.html").read()
-    current_app.logger.debug(f"check_session_iframe response: {doc}")
-    return doc
-
-
-@oidc_op_views.route("/verify_logout", methods=["GET", "POST"])
-def verify_logout():
-    part = urlparse(current_app.server.get_context().issuer)
-    page = render_template(
-        "logout.html",
-        op=part.hostname,
-        do_logout="rp_logout",
-        sjwt=request.args["sjwt"],
-    )
-    return page
-
-
-@oidc_op_views.route("/rp_logout", methods=["GET", "POST"])
-def rp_logout():
-    _endp = current_app.server.get_endpoint("session")
-    _info = _endp.unpack_signed_jwt(request.form["sjwt"])
-    try:
-        request.form["logout"]
-    except KeyError:
-        alla = False
-    else:
-        alla = True
-
-    _iframes = _endp.do_verified_logout(alla=alla, **_info)
-
-    if _iframes:
-        res = render_template(
-            "frontchannel_logout.html",
-            frames=" ".join(_iframes),
-            size=len(_iframes),
-            timeout=5000,
-            postLogoutRedirectUri=_info["redirect_uri"],
-        )
-    else:
-        res = redirect(_info["redirect_uri"])
-
-        # rohe are you sure that _kakor is the right word? :)
-        _kakor = _endp.kill_cookies()
-        for cookie in _kakor:
-            _add_cookie(res, cookie)
-
-    return res
-
-
-@oidc_op_views.route("/post_logout", methods=["GET"])
-def post_logout():
-    page = render_template("post_logout.html")
-    return page
-
-
 # Pre-authorized flow: only the issuer backend may mint codes (X-Api-Key).
 @oidc_op_views.route("/preauth_generate", methods=["POST"])
 def prea_auth():
@@ -1095,7 +1110,11 @@ def prea_auth():
     redirect_uri = "preauth"
     response_type = "code"
 
-    dynamic_registration(client_id=client_id, redirect_uri=redirect_uri)
+    registration_error, _ = dynamic_registration(
+        client_id=client_id, redirect_uri=redirect_uri, internal=True
+    )
+    if registration_error is not None:
+        return registration_error
 
     authorization_args = {
         "client_id": client_id,
@@ -1108,10 +1127,12 @@ def prea_auth():
         authorization_args["authorization_details"] = authorization_details
 
     try:
-
+        # The pre-authorized code grant has no PKCE: only this internal call
+        # may skip it.
         response = service_endpoint(
             current_app.server.get_endpoint("authorization"),
             get_args=authorization_args,
+            parse_kwargs={"pre_authorized_code": True},
         )
 
         # Ensure response is what we expect (e.g., has 'data' attribute if it's a Flask Response object)
@@ -1137,6 +1158,7 @@ def prea_auth():
             authorization_args.get("redirect_uri"),
             "server_error",
             "internal_service_unavailable",
+            client_id=authorization_args.get("client_id"),
         )
     except Exception as e:
         current_app.logger.error(
@@ -1146,6 +1168,7 @@ def prea_auth():
             authorization_args.get("redirect_uri"),
             "server_error",
             "unhandled_exception",
+            client_id=authorization_args.get("client_id"),
         )
 
     tx_code = 10000 + secrets.randbelow(90000)

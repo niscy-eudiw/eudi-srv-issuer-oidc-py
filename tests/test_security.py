@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from cryptojwt.jwt import JWT
 
-from conftest import BACKEND_API_KEY
+from conftest import BACKEND_API_KEY, make_wia_headers
 
 import application
 
@@ -19,7 +19,9 @@ CHALLENGE = base64.urlsafe_b64encode(hashlib.sha256(VERIFIER.encode()).digest())
 
 
 def _authorize(client, **extra):
-    """Runs a non-PAR authorization request; returns the backend redirect query."""
+    """Runs a pushed authorization request (with a WIA), then the browser's
+    authorization request; returns the backend redirect query."""
+    issuer = client.application.server.get_context().issuer
     args = {
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
@@ -30,7 +32,14 @@ def _authorize(client, **extra):
         "code_challenge_method": "S256",
         **extra,
     }
-    response = client.get("/authorization", query_string=args)
+    pushed = client.post(
+        "/pushed_authorization", data=args, headers=make_wia_headers(issuer, CLIENT_ID)
+    )
+    assert pushed.status_code in (200, 201), pushed.data
+    request_uri = json.loads(pushed.data)["request_uri"]
+    response = client.get(
+        "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": request_uri}
+    )
     assert response.status_code == 302, response.data
     location = response.headers["Location"]
     assert location.startswith("https://backend.test/auth_choice?")
@@ -135,7 +144,7 @@ class TestPreAuthorizedCodes:
                 "pre-authorized_code": code,
                 "tx_code": tx_code,
             },
-            headers=self.wia(),
+            headers=_with_dpop(self.wia()),
         )
 
     def test_unknown_code_is_400_not_500(self, client):
@@ -177,6 +186,13 @@ class TestRateLimits:
         client = app.test_client()
         codes = [client.post("/token", data={"grant_type": "x"}).status_code for _ in range(5)]
         assert codes[:3] == [400, 400, 400] and codes[3:] == [429, 429]
+
+
+def _with_dpop(headers=None):
+    """``headers`` plus a DPoP proof made with a new key (DPoP is required)."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    return {**(headers or {}), "DPoP": _dpop_proof(ec.generate_private_key(ec.SECP256R1()))}
 
 
 def _dpop_proof(key, htu="https://backend.dev.issuer.eudiw.dev/oidc/token", htm="POST", iat=None, alg="ES256", jti=None):
@@ -312,7 +328,7 @@ class TestLogRedaction:
                 "pre-authorized_code": body["preauth_code"],
                 "tx_code": str(body["tx_code"]),
             },
-            headers=wia(),
+            headers=_with_dpop(wia()),
         ).get_json()
         text = caplog.text
         assert token["access_token"] not in text
@@ -381,7 +397,7 @@ class TestWalletAttestationRequired:
                 "client_id": CLIENT_ID,
                 "code_verifier": VERIFIER,
             },
-            headers=headers or {},
+            headers=_with_dpop(headers),
         )
 
     def test_par_with_wia(self, client, wia):
@@ -398,7 +414,8 @@ class TestWalletAttestationRequired:
         assert self._par(client, wia(signer=ec.generate_private_key(ec.SECP256R1()))).status_code == 401
 
     def test_par_preauth_redirect_does_not_bypass_client_check(self, client, wia):
-        assert self._par(client, wia("another-wallet"), redirect_uri="preauth").status_code == 401
+        # The server's own "preauth" placeholder is refused before client authentication.
+        assert self._par(client, wia("another-wallet"), redirect_uri="preauth").status_code in (400, 401)
 
     def test_par_pop_for_another_server(self, client, wia):
         assert self._par(client, wia(pop_aud="https://other-as.test")).status_code == 401
@@ -427,5 +444,314 @@ class TestWalletAttestationRequired:
                 "pre-authorized_code": body["preauth_code"],
                 "tx_code": str(body["tx_code"]),
             },
+            headers=_with_dpop(),
         )
         assert response.status_code == 401
+
+
+class TestPkceRequired:
+    """PKCE was optional and allowed ``plain``: the add-on option was misspelt."""
+
+    _par = TestWalletAttestationRequired._par
+    PAR = TestWalletAttestationRequired.PAR
+
+    def _without(self, *names):
+        return {k: v for k, v in self.PAR.items() if k not in names}
+
+    def test_par_without_code_challenge_is_rejected(self, client, wia):
+        data = self._without("code_challenge", "code_challenge_method")
+        response = client.post("/pushed_authorization", data=data, headers=wia())
+        assert response.status_code == 400
+
+    def test_par_with_plain_method_is_rejected(self, client, wia):
+        response = self._par(client, wia(), code_challenge=VERIFIER, code_challenge_method="plain")
+        assert response.status_code == 400
+
+    def test_par_with_s256_is_accepted(self, client, wia):
+        assert self._par(client, wia()).status_code in (200, 201)
+
+    def test_only_s256_is_advertised(self, client):
+        metadata = json.loads(client.get("/.well-known/openid-configuration").data)
+        assert metadata.get("code_challenge_methods_supported") == ["S256"]
+
+
+class TestUnusedEndpointsRemoved:
+    """Open client registration (with remote jwks_uri fetches), userinfo and
+    logout endpoints were exposed although no flow of this server uses them."""
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/registration",
+            "/registration_api",
+            "/userinfo",
+            "/session",
+            "/check_session_iframe",
+            "/verify_logout",
+            "/rp_logout",
+            "/post_logout",
+        ],
+    )
+    def test_not_routed(self, client, path):
+        assert client.get(path).status_code == 404
+        assert client.post(path).status_code in (404, 405)
+
+
+class TestClientRegistration:
+    """Any caller could register a client_id with any redirect_uri, before
+    client authentication, overwriting the entry of a genuine wallet."""
+
+    _par = TestWalletAttestationRequired._par
+    PAR = TestWalletAttestationRequired.PAR
+
+    @pytest.mark.parametrize(
+        "uri",
+        ["javascript:x", "//other.test/cb", "http://other.test/cb", "https://w.test/cb#f", "preauth", ""],
+    )
+    def test_unsafe_redirect_uri_is_refused(self, client, wia, uri):
+        response = self._par(client, wia(), redirect_uri=uri)
+        assert response.status_code == 400
+        assert "Location" not in response.headers
+
+    @pytest.mark.parametrize(
+        "uri", ["https://wallet.test/cb", "http://127.0.0.1:5999/cb", "eu.europa.ec.euidi://authorization"]
+    )
+    def test_native_app_redirect_uris_are_accepted(self, client, wia, uri):
+        assert self._par(client, wia(), redirect_uri=uri).status_code in (200, 201)
+
+    def test_failed_client_authentication_leaves_the_client_unchanged(self, app, client, wia):
+        assert self._par(client, wia()).status_code in (200, 201)
+        cdb = app.server.get_context().cdb
+        before = dict(cdb[CLIENT_ID])
+        response = self._par(client, redirect_uri="https://other.test/cb")  # no WIA
+        assert response.status_code == 401
+        assert dict(cdb[CLIENT_ID]) == before
+
+    def test_failed_client_authentication_registers_nothing(self, app, client):
+        response = self._par(client, client_id="never-seen")
+        assert response.status_code in (400, 401)
+        assert "never-seen" not in app.server.get_context().cdb
+
+    def test_non_pushed_authorization_request_is_refused(self, client):
+        response = client.get(
+            "/authorization",
+            query_string={
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "response_type": "code",
+                "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256",
+            },
+        )
+        assert response.status_code == 400
+        assert "Location" not in response.headers
+
+
+class TestErrorRedirect:
+    """Authorization errors redirected to any redirect_uri the request named."""
+
+    def test_unregistered_uri_gets_json_not_a_redirect(self, app):
+        import views
+
+        with app.test_request_context("/"):
+            response = views.auth_error_redirect(
+                "https://other.test/cb", "server_error", "x", client_id=CLIENT_ID
+            )
+        assert response.status_code == 500
+        assert "Location" not in response.headers
+        assert json.loads(response.data)["error"] == "server_error"
+
+    def test_without_client_gets_json(self, app):
+        import views
+
+        with app.test_request_context("/"):
+            response = views.auth_error_redirect(REDIRECT_URI, "invalid_request")
+        assert response.status_code == 400
+        assert "Location" not in response.headers
+
+    def test_registered_uri_gets_the_redirect(self, app, client, wia):
+        import views
+
+        assert TestWalletAttestationRequired()._par(client, wia()).status_code in (200, 201)
+        with app.test_request_context("/"):
+            response = views.auth_error_redirect(REDIRECT_URI, "access_denied", client_id=CLIENT_ID)
+        assert response.status_code == 302
+        assert response.headers["Location"].startswith(REDIRECT_URI + "?error=access_denied")
+
+
+class TestAuthenticationHandOffToken:
+    """The token returned through /verify/user never expired, could be
+    redeemed for a new code again and again, and was accepted when signed by
+    any key in the server's key jar."""
+
+    def _verify(self, client, token, session_id):
+        return client.get("/verify/user", query_string={"token": token, "username": session_id})
+
+    def test_token_is_single_use(self, client):
+        mine = _authorize(client)
+        assert self._verify(client, mine["token"], mine["session_id"]).status_code == 302
+        again = self._verify(client, mine["token"], mine["session_id"])
+        assert again.status_code == 400
+        assert "Location" not in again.headers
+
+    def test_token_expires(self, app, client):
+        mine = _authorize(client)
+        authn = app.server.get_context().authn_broker.get_method_by_id("user")
+        claims = authn.unpack_token(mine["token"])
+        assert "exp" in claims and claims["exp"] > claims["iat"]
+
+    def test_token_from_another_issuer_is_refused(self, app):
+        from idpyoidc.server.user_authn.user import create_signed_jwt
+
+        context = app.server.get_context()
+        authn = context.authn_broker.get_method_by_id("user")
+        forged = create_signed_jwt(
+            "https://other-issuer.test", context.keyjar, sign_alg=authn.sign_alg, lifetime=60, query="x"
+        )
+        with pytest.raises(Exception):
+            authn.unpack_token(forged)
+
+    def test_token_without_exp_is_refused(self, app):
+        from idpyoidc.server.user_authn.user import create_signed_jwt
+
+        context = app.server.get_context()
+        authn = context.authn_broker.get_method_by_id("user")
+        endless = create_signed_jwt(context.issuer, context.keyjar, sign_alg=authn.sign_alg, query="x")
+        with pytest.raises(Exception):
+            authn.unpack_token(endless)
+
+
+class TestDpopRequired:
+    """Tokens were issued as plain bearer tokens when no DPoP proof was sent."""
+
+    def test_token_request_without_dpop_is_refused(self, client, wia):
+        body = client.post(
+            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+        ).get_json()
+        response = client.post(
+            "/token",
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+                "pre-authorized_code": body["preauth_code"],
+                "tx_code": str(body["tx_code"]),
+            },
+            headers=wia(),
+        )
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_dpop_proof"
+
+
+class TestKeysRoute:
+    def test_missing_file_is_404_not_500(self, client):
+        assert client.get("/keys/missing.json").status_code == 404
+
+    def test_only_json_files_are_served(self, client):
+        assert client.get("/keys/config").status_code == 404
+
+
+class TestOptionalProtocolFeatures:
+    """OpenID4VCI 1.0 only RECOMMENDS PAR, PKCE, DPoP and wallet attestation:
+    each is required by default and can be switched off for testing. A
+    feature that is switched off but used anyway is still checked."""
+
+    PAR = TestWalletAttestationRequired.PAR
+    _par = TestWalletAttestationRequired._par
+
+    @pytest.fixture
+    def relaxed(self, app):
+        from security import configure_client_authentication
+
+        app.require_pushed_authorization_requests = False
+        app.require_dpop = False
+        configure_client_authentication(app, require_wallet_attestation=False)
+        app.server.get_context().add_on["pkce"]["essential"] = False
+        return app
+
+    def _discovery(self, client):
+        return json.loads(client.get("/.well-known/openid-configuration").data)
+
+    def test_discovery_is_strict_by_default(self, client):
+        doc = self._discovery(client)
+        assert doc["require_pushed_authorization_requests"] is True
+        assert doc["code_challenge_methods_supported"] == ["S256"]
+        assert doc["token_endpoint_auth_methods_supported"] == ["attest_jwt_client_auth"]
+
+    def test_discovery_follows_the_switches(self, relaxed, client):
+        doc = self._discovery(client)
+        assert doc["require_pushed_authorization_requests"] is False
+        assert "none" in doc["token_endpoint_auth_methods_supported"]
+
+    def test_plain_authorization_request_without_pkce(self, relaxed, client):
+        response = client.get(
+            "/authorization",
+            query_string={"client_id": CLIENT_ID, "redirect_uri": REDIRECT_URI, "response_type": "code",
+                          "scope": "eu.europa.ec.eudi.pid_mdoc", "state": "st"},
+        )
+        assert response.status_code == 302
+        assert response.headers["Location"].startswith("https://backend.test/auth_choice?")
+
+    def test_plain_authorization_request_still_checks_the_redirect_uri(self, relaxed, client):
+        response = client.get(
+            "/authorization",
+            query_string={"client_id": CLIENT_ID, "redirect_uri": "javascript:x", "response_type": "code"},
+        )
+        assert response.status_code == 400
+
+    def test_par_without_wallet_attestation(self, relaxed, client):
+        assert self._par(client).status_code in (200, 201)
+
+    def test_a_wallet_attestation_that_is_sent_is_still_verified(self, relaxed, client, wia):
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        forged = wia(signer=ec.generate_private_key(ec.SECP256R1()))
+        assert self._par(client, forged).status_code == 401
+
+    def test_pkce_plain_is_still_refused_when_pkce_is_optional(self, relaxed, client):
+        response = self._par(client, code_challenge="x" * 43, code_challenge_method="plain")
+        assert response.status_code == 400
+
+    def test_bearer_token_without_dpop_or_wia(self, relaxed, client):
+        body = client.post(
+            "/preauth_generate", data={"scope": "eu.europa.ec.eudi.pid_mdoc"}, headers={"X-Api-Key": BACKEND_API_KEY}
+        ).get_json()
+        response = client.post(
+            "/token",
+            data={
+                "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+                "pre-authorized_code": body["preauth_code"],
+                "tx_code": str(body["tx_code"]),
+            },
+        )
+        assert response.status_code == 200, response.data
+        assert response.get_json()["token_type"].lower() == "bearer"
+
+
+class TestConfigurationFormats:
+    """config.json became the commented config.yaml; JSON deployments keep working."""
+
+    def test_yaml_and_json_load_the_same_configuration(self, tmp_path):
+        import os
+
+        import yaml
+        from idpyoidc.util import load_config_file
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        yaml_path = os.path.join(root, "config.yaml")
+        json_path = tmp_path / "config.json"
+        json_path.write_text(json.dumps(yaml.safe_load(open(yaml_path))))
+        assert load_config_file(yaml_path) == load_config_file(str(json_path))
+
+    def test_openid4vci_switches_are_on_in_the_example(self):
+        import os
+
+        import yaml
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config = yaml.safe_load(open(os.path.join(root, "config.yaml")))
+        assert config["require_pushed_authorization_requests"] is True
+        assert config["require_dpop"] is True
+        assert config["require_wallet_attestation"] is True
+        assert config["op"]["server_info"]["add_ons"]["pkce"]["kwargs"] == {
+            "essential": True,
+            "code_challenge_methods": ["S256"],
+        }

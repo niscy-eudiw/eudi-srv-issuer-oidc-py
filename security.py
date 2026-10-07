@@ -5,10 +5,17 @@
   credentials instead of reading them from the query string.
 * :func:`backend_api_key_error` protects the endpoints only the issuer
   backend may call (``/preauth_generate``).
+* :func:`valid_redirect_uri` decides which wallet redirect URIs a client
+  may register.
 """
 
+import hashlib
 import hmac
+import ipaddress
+import threading
+import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from cryptojwt.jwt import JWT
 from flask import current_app, jsonify, request
@@ -50,6 +57,106 @@ def session_token(
     return signer.pack(payload=claims, aud=[SESSION_TOKEN_AUDIENCE])
 
 
+#: Redirect URI the server registers for its own pre-authorized code request.
+PREAUTH_REDIRECT_URI = "preauth"
+#: Schemes that run code or read local data in a browser.
+_UNSAFE_SCHEMES = frozenset({"javascript", "data", "vbscript", "file", "blob", "about"})
+
+
+def valid_redirect_uri(uri: Optional[str]) -> bool:
+    """Checks a wallet redirect URI, following RFC 8252 (OAuth for native apps).
+
+    Accepted: an ``https`` URL with a host, an ``http`` URL on a loopback
+    address, or a private-use scheme in reverse-domain form (it contains a
+    ``.``, e.g. ``eu.europa.ec.euidi://authorization``). A fragment is never
+    allowed (RFC 6749 3.1.2).
+
+    Args:
+        uri: The ``redirect_uri`` a client sent.
+
+    Returns:
+        True when the URI may be registered.
+    """
+    if not uri or not isinstance(uri, str) or uri != uri.strip():
+        return False
+    if any(ord(c) < 0x21 or c == "\\" for c in uri):
+        return False
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    scheme = parts.scheme.lower()
+    if not scheme or parts.fragment or "#" in uri or scheme in _UNSAFE_SCHEMES:
+        return False
+    if scheme == "https":
+        return bool(parts.hostname) and not parts.username and not parts.password
+    if scheme == "http":
+        return _is_loopback(parts.hostname) and not parts.username and not parts.password
+    return "." in scheme
+
+
+def _is_loopback(host: Optional[str]) -> bool:
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class OneTimeUse:
+    """Remembers values (by hash) until they expire, to refuse a second use.
+
+    In memory: run a single process, or replace it with a shared store.
+    """
+
+    def __init__(self, max_entries: int = 100_000):
+        self._seen: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._max_entries = max_entries
+
+    def first_use(self, value: str, ttl: int) -> bool:
+        """Returns True the first time ``value`` is seen within ``ttl`` seconds."""
+        key = hashlib.sha256(value.encode()).hexdigest()
+        now = time.time()
+        with self._lock:
+            if len(self._seen) >= self._max_entries:
+                self._seen = {k: exp for k, exp in self._seen.items() if exp > now}
+            if self._seen.get(key, 0) > now:
+                return False
+            if len(self._seen) >= self._max_entries:
+                return False  # full of live entries: fail closed
+            self._seen[key] = now + ttl
+            return True
+
+
+#: Authentication hand-off tokens already redeemed at /verify/user.
+used_authn_tokens = OneTimeUse()
+
+
+#: Endpoints where the wallet authenticates as a client.
+WALLET_CLIENT_ENDPOINTS = ("pushed_authorization", "token")
+
+
+def configure_client_authentication(app, require_wallet_attestation: bool = True) -> None:
+    """Sets how wallets authenticate at the PAR and token endpoints.
+
+    OpenID4VCI only RECOMMENDS wallet attestation (section 13.2). With it
+    required (the default), only ``wallet_attestation`` is accepted. Otherwise
+    a wallet may also be a public client; an attestation that is sent is still
+    verified first, and a failing one is rejected, never ignored.
+    """
+    methods = ["wallet_attestation"]
+    if not require_wallet_attestation:
+        methods += ["public", "none"]
+    for name in WALLET_CLIENT_ENDPOINTS:
+        endpoint = app.server.get_endpoint(name)
+        if endpoint is not None:
+            endpoint.client_authn_method = list(methods)
+
+
 def backend_api_key_error():
     """Checks the ``X-Api-Key`` header sent by the issuer backend.
 
@@ -63,7 +170,8 @@ def backend_api_key_error():
         return jsonify({"error": "service_unavailable", "error_description": "API key not configured"}), 503
     candidate = request.headers.get("X-Api-Key") or ""
     if not hmac.compare_digest(candidate.encode(), str(expected).encode()):
-        current_app.logger.warning(f"Rejected {request.path}: missing or invalid X-Api-Key")
+        # The matched route, not the raw (client-controlled) path.
+        current_app.logger.warning(f"Rejected {request.url_rule.rule}: missing or invalid X-Api-Key")
         return jsonify({"error": "unauthorized", "error_description": "Missing or invalid API key"}), 401
     return None
 

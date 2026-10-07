@@ -155,8 +155,9 @@ This guide provides step-by-step instructions for deploying the **EUDIW Issuer A
 
     * **Create the configuration file:** We recommend copying the example file to create your local configuration.
 
-    * **Update variables:** Edit the newly created `config.json` file with your specific settings.
-        * *Reference example:* [config.json example](./config.json)
+    * **Update variables:** Edit the newly created `config.yaml` file with your specific settings; every setting is commented.
+        * *Reference example:* [config.yaml example](./config.yaml)
+        * A JSON file with the same keys still works (`server.py` reads `.json` or `.yaml` by extension); the Docker image reads `/etc/issuer_config/authorization_config.yaml`.
 
 
 4. Pull the Docker Image

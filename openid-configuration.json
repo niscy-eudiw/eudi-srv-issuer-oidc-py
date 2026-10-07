@@ -44,20 +44,6 @@
         "HS384",
         "HS512"
     ],
-    "userinfo_signing_alg_values_supported": [
-        "RS256",
-        "RS384",
-        "RS512",
-        "ES256",
-        "ES384",
-        "ES512",
-        "PS256",
-        "PS384",
-        "PS512",
-        "HS256",
-        "HS384",
-        "HS512"
-    ],
     "request_object_signing_alg_values_supported": [
         "RS256",
         "RS384",
@@ -78,10 +64,9 @@
         "S256"
     ],
     "issuer": "https://dev.issuer.eudiw.dev/oidc",
-    "registration_endpoint": "https://dev.issuer.eudiw.dev/oidc/registration",
     "introspection_endpoint": "https://dev.issuer.eudiw.dev/oidc/introspection",
     "authorization_endpoint": "https://dev.issuer.eudiw.dev/oidc/authorization",
     "token_endpoint": "https://dev.issuer.eudiw.dev/oidc/token",
-    "userinfo_endpoint": "https://dev.issuer.eudiw.dev/oidc/userinfo",
-    "pushed_authorization_request_endpoint": "https://dev.issuer.eudiw.dev/oidc/pushed_authorization"
+    "pushed_authorization_request_endpoint": "https://dev.issuer.eudiw.dev/oidc/pushed_authorization",
+    "require_pushed_authorization_requests": true
 }

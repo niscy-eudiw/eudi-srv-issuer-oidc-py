@@ -11,10 +11,10 @@ from idpyoidc.ssl_context import create_context
 
 try:
     from .application import oidc_provider_init_app
-    from .security import init_rate_limits
+    from .security import configure_client_authentication, init_rate_limits
 except (ModuleNotFoundError, ImportError):
     from application import oidc_provider_init_app
-    from security import init_rate_limits
+    from security import configure_client_authentication, init_rate_limits
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
 
@@ -69,6 +69,15 @@ def main(config_file, args):
     # Shared with the issuer backend; protects /preauth_generate.
     app.backend_api_key = getattr(config, "backend_api_key", None)
     init_rate_limits(app, getattr(config, "rate_limiting", None))
+    # Non-pushed authorization requests are refused unless this is false.
+    app.require_pushed_authorization_requests = getattr(
+        config, "require_pushed_authorization_requests", True
+    ) is not False
+    # Tokens without a DPoP proof are refused unless this is false.
+    app.require_dpop = getattr(config, "require_dpop", True) is not False
+    # Wallet attestation (WIA) at PAR and /token, unless this is false.
+    app.require_wallet_attestation = getattr(config, "require_wallet_attestation", True) is not False
+    configure_client_authentication(app, app.require_wallet_attestation)
 
     web_conf = config.web_conf
 
@@ -83,8 +92,10 @@ def main(config_file, args):
         kwargs["ssl_context"] = context """
         # kwargs["request_handler"] = PeerCertWSGIRequestHandler
 
+    # Containers need every interface; set webserver.host to 127.0.0.1 to
+    # keep a bare-metal or development server off the network.
     app.run(
-        host="0.0.0.0",#web_conf["domain"],
+        host=web_conf.get("host", "0.0.0.0"),
         port=web_conf["port"],
         debug=web_conf["debug"],
         **kwargs

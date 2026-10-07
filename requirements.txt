@@ -1,5 +1,5 @@
 flask==3.1.3
 Flask-Limiter==4.1.1
-# niscy-eudiw fork (branch-development), pinned to the commit the tests ran against.
-git+https://github.com/niscy-eudiw/idpy-oidc.git@3f3a5bdf064ca79178534d5776aa3fca1387a5ca
-pyjwt==2.12.1
+# niscy-eudiw fork (branch-refractoring), pinned to the commit the tests ran against.
+git+https://github.com/niscy-eudiw/idpy-oidc.git@b7da7c6518dc323a066a4f652b49b4a50cf57663
+pyjwt==2.15.1

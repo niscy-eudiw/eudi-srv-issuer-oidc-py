@@ -1,4 +1,4 @@
-"""Builds the authorization server from config.json with throw-away keys."""
+"""Builds the authorization server from config.yaml with throw-away keys."""
 
 import base64
 import copy
@@ -11,6 +11,7 @@ import uuid
 
 import jwt as pyjwt
 import pytest
+import yaml
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -75,8 +76,8 @@ def make_wia_headers(aud, client_id=WALLET_CLIENT_ID, pop_aud=None, signer=None)
 
 
 def _test_config(tmp_path):
-    with open(os.path.join(ROOT, "config.json")) as f:
-        config = json.load(f)
+    with open(os.path.join(ROOT, "config.yaml")) as f:
+        config = yaml.safe_load(f)
     config = copy.deepcopy(config)
     config["logging"] = {"version": 1, "disable_existing_loggers": False, "root": {"level": "WARNING"}}
     server_info = config["op"]["server_info"]
@@ -133,6 +134,13 @@ def app(tmp_path):
     app.config["TESTING"] = True
     app.authorization_redirect_url = "https://backend.test/auth_choice"
     app.backend_api_key = getattr(config, "backend_api_key", None)
+    # As server.py does: the OpenID4VCI switches, all on in config.yaml.
+    from security import configure_client_authentication
+
+    app.require_pushed_authorization_requests = getattr(config, "require_pushed_authorization_requests", True)
+    app.require_dpop = getattr(config, "require_dpop", True)
+    app.require_wallet_attestation = getattr(config, "require_wallet_attestation", True)
+    configure_client_authentication(app, app.require_wallet_attestation)
     return app
 
 
