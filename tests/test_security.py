@@ -161,7 +161,7 @@ class TestPreAuthorizedCodes:
             assert self._redeem(client, body["preauth_code"], wrong).status_code == 400
         response = self._redeem(client, body["preauth_code"], str(body["tx_code"]))
         assert response.status_code == 400
-        assert "invalid or expired" in response.get_json()["description"]
+        assert "invalid or expired" in response.get_json()["error_description"]
 
     def test_code_is_single_use(self, client):
         body = self._generate(client).get_json()

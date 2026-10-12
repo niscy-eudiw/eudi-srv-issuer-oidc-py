@@ -102,7 +102,7 @@ op:
               expires_in: 300
             refresh_token:
               supports_minting: [access_token, refresh_token]
-              expires_in: 600
+              expires_in: 604800           # one week: wallets re-issue credentials with it
           expires_in: 2592000              # lifetime of the grant itself (30 days)
 
     # User authentication: hands the browser to the issuer backend, which
@@ -243,7 +243,7 @@ op:
       refresh:
         class: idpyoidc.server.token.jwt_token.JWTToken
         kwargs:
-          lifetime: 3600
+          lifetime: 604800                 # the authz usage_rules expires_in takes precedence
           aud: ["https://example.org/appl"]
       id_token:
         class: idpyoidc.server.token.id_token.IDToken

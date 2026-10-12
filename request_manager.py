@@ -335,10 +335,15 @@ class RequestManager:
                     f"Attempted to update access_token for non-existent session_id: {session_id}"
                 )
 
-    def update_refresh_token(self, session_id: str, refresh_token: str):
+    def update_refresh_token(
+        self, session_id: str, refresh_token: str, lifetime_seconds: Optional[int] = None
+    ):
         """
         Updates the 'refresh_token' and its lookup index.
         Requires locking both the primary and refresh token dictionaries.
+
+        :param lifetime_seconds: how long the refresh token is valid; the session
+            is kept at least that long, or the token could not be looked up.
         """
         with self._requests_lock, self._requests_by_refresh_token_lock:
             request_obj = self._requests.get(session_id)
@@ -351,6 +356,12 @@ class RequestManager:
 
                 request_obj.refresh_token = refresh_token
                 self._requests_by_refresh_token[refresh_token] = request_obj
+                if lifetime_seconds:
+                    request_obj.expiry_time = max(
+                        request_obj.expiry_time,
+                        datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(seconds=lifetime_seconds),
+                    )
                 logger.debug(
                     f"Updated refresh_token for session_id {session_id}"
                 )

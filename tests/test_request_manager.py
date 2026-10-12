@@ -207,6 +207,19 @@ class TestUpdatesAndLookups:
         assert manager.get_request_by_refresh_token("rt1") is None
         assert manager.get_request_by_refresh_token("rt2").refresh_token == "rt2"
 
+    def test_update_refresh_token_keeps_the_session_for_its_lifetime(self, manager):
+        week = 7 * 24 * 3600
+        manager.update_refresh_token("s", "rt", lifetime_seconds=week)
+        remaining = manager.get_request("s").expiry_time - datetime.datetime.now(
+            datetime.timezone.utc
+        )
+        assert remaining.total_seconds() > week - 60
+
+    def test_update_refresh_token_never_shortens_the_session(self, manager):
+        before = manager.get_request("s").expiry_time
+        manager.update_refresh_token("s", "rt", lifetime_seconds=1)
+        assert manager.get_request("s").expiry_time == before
+
     def test_update_pre_authorized_code_replaces_the_index_entry(self, manager):
         manager.update_pre_authorized_code("s", "p1")
         manager.update_pre_authorized_code("s", "p2")

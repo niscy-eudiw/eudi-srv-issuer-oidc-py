@@ -2,6 +2,7 @@
 /verify/user, /preauth_generate, discovery, static files and the
 service_endpoint glue around the idpy-oidc endpoints."""
 
+import datetime
 import json
 from urllib.parse import parse_qs, urlsplit
 
@@ -111,6 +112,35 @@ class TestRefreshTokenGrant:
         assert again.status_code == 400
         assert again.get_json()["error"] == "invalid_grant"
 
+    # RFC 6749 section 5.2: these tokens reach idpy-oidc (the session still
+    # knows them), which must answer invalid_grant so the wallet re-authorizes.
+    def test_expired_refresh_token_is_invalid_grant(self, client, wia, key, monkeypatch):
+        first = _code_tokens(client, wia, key)
+        monkeypatch.setattr("idpyoidc.server.token.jwt_token.is_expired", lambda *a, **k: True)
+        response = _refresh(client, wia, first["refresh_token"], key)
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_grant"
+
+    def test_revoked_refresh_token_is_invalid_grant(self, app, client, wia, key):
+        first = _code_tokens(client, wia, key)
+        _mngr = app.server.get_context().session_manager
+        _info = _mngr.get_session_info_by_token(
+            first["refresh_token"], handler_key="refresh_token", grant=True
+        )
+        _info["grant"].get_token(first["refresh_token"]).revoke()
+        response = _refresh(client, wia, first["refresh_token"], key)
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_grant"
+
+    def test_refresh_keeps_the_session_for_the_refresh_token_lifetime(self, app, client, wia, key):
+        first = _code_tokens(client, wia, key)
+        session = application.request_manager.get_request_by_refresh_token(first["refresh_token"])
+        _lifetime = app.server.get_context().authz.grant_config["usage_rules"]["refresh_token"][
+            "expires_in"
+        ]
+        remaining = session.expiry_time - datetime.datetime.now(datetime.timezone.utc)
+        assert remaining.total_seconds() >= _lifetime - 60
+
     def test_refresh_with_another_dpop_key_is_refused(self, client, wia, key):
         first = _code_tokens(client, wia, key)
         response = _refresh(client, wia, first["refresh_token"])  # new key
@@ -134,7 +164,7 @@ class TestRefreshTokenGrant:
     def test_missing_refresh_token(self, client, wia):
         response = _refresh(client, wia, None)
         assert response.status_code == 400
-        assert response.get_json()["description"] == "missing refresh_token"
+        assert response.get_json() == {"error": "invalid_request", "error_description": "missing refresh_token"}
 
     def test_refresh_rejected_by_the_token_endpoint_is_passed_on(self, client, wia, key):
         """Without the wallet attestation the token endpoint answers 401."""
@@ -148,17 +178,21 @@ class TestRefreshTokenGrant:
 
 
 class TestTokenErrors:
-    @pytest.mark.parametrize("grant_type", ["password", None])
-    def test_unsupported_grant_type(self, client, grant_type):
-        data = {"grant_type": grant_type} if grant_type else {}
-        response = client.post("/token", data=data, headers=_with_dpop())
+    def test_unsupported_grant_type(self, client):
+        response = client.post("/token", data={"grant_type": "password"}, headers=_with_dpop())
         assert response.status_code == 400
         assert response.get_json()["error"] == "unsupported_grant_type"
+
+    def test_missing_grant_type(self, client):
+        """RFC 6749 section 5.2: a missing required parameter is invalid_request."""
+        response = client.post("/token", data={}, headers=_with_dpop())
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_request"
 
     def test_authorization_code_missing(self, client):
         response = client.post("/token", data={"grant_type": "authorization_code"}, headers=_with_dpop())
         assert response.status_code == 400
-        assert response.get_json()["description"] == "missing code"
+        assert response.get_json()["error_description"] == "missing code"
 
     def test_authorization_code_unknown(self, client):
         response = client.post(
@@ -177,7 +211,7 @@ class TestTokenErrors:
     def test_pre_authorized_code_missing_parameters(self, client, data, description):
         response = client.post("/token", data={"grant_type": PREAUTH_GRANT, **data}, headers=_with_dpop())
         assert response.status_code == 400
-        assert response.get_json()["description"] == description
+        assert response.get_json()["error_description"] == description
 
     def test_malformed_dpop_proof(self, client, wia):
         """The proof is validated by the idpy-oidc DPoP add-on, on an otherwise valid request."""
@@ -244,11 +278,12 @@ class TestAuthorizationEndpoint:
     def test_empty_request_uri(self, client):
         response = client.get("/authorization", query_string={"request_uri": ""})
         assert response.status_code == 400
-        assert response.data == b"bad request!"
+        assert response.get_json()["error"] == "invalid_request"
 
     def test_unknown_request_uri(self, client):
         response = client.get("/authorization", query_string={"client_id": CLIENT_ID, "request_uri": "urn:unknown"})
-        assert response.status_code == 404
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_request_uri"
 
     def test_par_required(self, client):
         response = client.get("/authorization", query_string={"client_id": CLIENT_ID})
@@ -312,7 +347,7 @@ class TestNonPushedAuthorization:
         args = {k: v for k, v in self.ARGS.items() if k != missing}
         response = client.get("/authorization", query_string=args)
         assert response.status_code == 400
-        assert response.data == b"Missing required parameters"
+        assert response.get_json() == {"error": "invalid_request", "error_description": "Missing required parameters"}
 
     def test_store_failure_is_500(self, relaxed, client, monkeypatch):
         def fail(**kwargs):
@@ -321,7 +356,7 @@ class TestNonPushedAuthorization:
         monkeypatch.setattr(application.request_manager, "add_request", fail)
         response = client.get("/authorization", query_string=self.ARGS)
         assert response.status_code == 500
-        assert response.get_json() == {"error": "Failed to process request"}
+        assert response.get_json() == {"error": "server_error", "error_description": "Failed to process request"}
 
     def test_pkce_and_issuer_state_are_kept(self, relaxed, client):
         response = client.get(
@@ -554,12 +589,12 @@ class TestParEndpoint:
         data = {k: v for k, v in TestWalletAttestationRequired.PAR.items() if k != missing}
         response = client.post("/pushed_authorization", data=data, headers=wia())
         assert response.status_code == 400
-        assert response.get_json() == {"error": "Missing required parameters"}
+        assert response.get_json() == {"error": "invalid_request", "error_description": "Missing required parameters"}
 
     def test_invalid_authorization_details(self, client, wia):
         response = _par(client, wia(), authorization_details="{not json")
         assert response.status_code == 400
-        assert response.get_json() == {"error": "Invalid authorization_details JSON"}
+        assert response.get_json() == {"error": "invalid_request", "error_description": "Invalid authorization_details JSON"}
 
     def test_endpoint_exception_is_500_and_registers_nothing(self, app, client, monkeypatch):
         def fail(*args, **kwargs):
@@ -577,7 +612,7 @@ class TestParEndpoint:
         monkeypatch.setattr(application.request_manager, "add_request", fail)
         response = _par(client, wia())
         assert response.status_code == 500
-        assert response.get_json() == {"error": "Failed to process request"}
+        assert response.get_json() == {"error": "server_error", "error_description": "Failed to process request"}
 
     def test_frontend_id_is_stored(self, client, wia):
         request_uri = _par(client, wia(), frontend_id="fe-9").get_json()["request_uri"]
@@ -618,7 +653,7 @@ class TestDiscoveryAndStatic:
 
     def test_unsupported_service(self, client):
         response = client.get("/.well-known/security.txt")
-        assert response.status_code == 400
+        assert response.status_code == 404
         assert response.data == b"Not supported"
 
     def test_index(self, client):

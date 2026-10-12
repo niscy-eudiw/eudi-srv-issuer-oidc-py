@@ -157,7 +157,7 @@ def authentication_error_redirect(jws_token, error, error_description):
 
 
 # Error redirection to the wallet during authentication without jws_token
-def auth_error_redirect(return_uri, error, error_description=None, client_id=None):
+def auth_error_redirect(return_uri, error, error_description=None, client_id=None, state=None):
     """Sends an OAuth error to the client's redirect URI.
 
     Redirects only to a URI registered for ``client_id`` (RFC 6749 4.1.2.1);
@@ -173,8 +173,12 @@ def auth_error_redirect(return_uri, error, error_description=None, client_id=Non
         registered = current_app.server.get_context().cdb.get(client_id, {}).get("redirect_uris", [])
         registered = [uri[0] if isinstance(uri, (list, tuple)) else uri for uri in registered]
     if return_uri and return_uri in registered and valid_redirect_uri(return_uri):
+        params = dict(error_msg)
+        if state:
+            # RFC 6749 4.1.2.1: the state of the authorization request comes back.
+            params["state"] = state
         separator = "&" if urllib.parse.urlsplit(return_uri).query else "?"
-        return redirect(return_uri + separator + urllib.parse.urlencode(error_msg), code=302)
+        return redirect(return_uri + separator + urllib.parse.urlencode(params), code=302)
 
     status = 500 if error == "server_error" else 400
     return make_response(json.dumps(error_msg), status, {"Content-Type": "application/json"})
@@ -337,18 +341,43 @@ def well_known(service):
     elif service == "webfinger":
         _endpoint = current_app.server.get_endpoint("discovery")
     else:
-        return make_response("Not supported", 400)
+        # RFC 8615: a well-known URI that is not defined here does not exist.
+        return make_response("Not supported", 404)
 
     return service_endpoint(_endpoint)
 
 
-def _registration_error(description):
-    """400 ``invalid_request`` as JSON: never redirect to an unchecked URI."""
+def _oauth_error(error, description, status=400):
+    """An OAuth error response as JSON (RFC 6749 section 5.2)."""
     return make_response(
-        json.dumps({"error": "invalid_request", "error_description": description}),
-        400,
+        json.dumps({"error": error, "error_description": description}),
+        status,
         {"Content-Type": "application/json"},
     )
+
+
+def _registration_error(description):
+    """400 ``invalid_request`` as JSON: never redirect to an unchecked URI."""
+    return _oauth_error("invalid_request", description)
+
+
+#: The only authorization details type this server knows (OpenID4VCI 1.0 section 5.1.1).
+_AUTHORIZATION_DETAILS_TYPES = ("openid_credential",)
+
+
+def _authorization_details_error(details):
+    """``invalid_authorization_details`` (RFC 9396 section 5) for a value that
+    is not a non-empty array of objects of a known type, else None."""
+    if (
+        not isinstance(details, list)
+        or not details
+        or not all(isinstance(d, dict) and d.get("type") in _AUTHORIZATION_DETAILS_TYPES for d in details)
+    ):
+        return _oauth_error(
+            "invalid_authorization_details",
+            "authorization_details must be an array of openid_credential objects",
+        )
+    return None
 
 
 #: Serialises client registrations. They read, change and write the shared
@@ -446,19 +475,26 @@ def authorization():
     if "request_uri" in request.args:
         request_uri = request.args.get("request_uri")
 
+        # Errors before the pushed request is found are never redirected: no
+        # redirect URI is known for them (RFC 6749 4.1.2.1).
         if not request_uri:
             current_app.logger.warning(
                 "Authorization Request: 'request_uri' is missing from the request."
             )
-            abort(400, "Bad Request: 'request_uri' parameter is mandatory.")
+            return _oauth_error("invalid_request", "request_uri is empty")
 
         current_request = request_manager.get_request_by_uri(request_uri)
 
         if not current_request:
             current_app.logger.warning("Authorization Request: no pending request for the request_uri")
-            abort(
-                404, "Not Found: No authorization request found for the provided URI."
-            )
+            # RFC 9126 section 4: an unknown or expired request_uri is invalid.
+            return _oauth_error("invalid_request_uri", "unknown or expired request_uri")
+
+        # RFC 9126 section 2.2: the request_uri is bound to the client that
+        # pushed it; RFC 9101 section 5: client_id is required alongside it.
+        if request.args.get("client_id") != current_request.client_id:
+            current_app.logger.warning("Authorization Request: client_id does not match the pushed request")
+            return _oauth_error("invalid_request", "client_id does not match the pushed authorization request")
 
         session_id = current_request.session_id
 
@@ -528,7 +564,7 @@ def authorization():
                 current_app.logger.error(
                     "Missing required parameters for traditional authorization."
                 )
-                return make_response("Missing required parameters", 400)
+                return _registration_error("Missing required parameters")
 
         except (
             Exception
@@ -557,7 +593,7 @@ def authorization():
             )
         except Exception as e:
             current_app.logger.error(f"Error adding request: {e}")
-            return jsonify({"error": "Failed to process request"}), 500
+            return _oauth_error("server_error", "Failed to process request", 500)
 
         authorization_args = {
             "client_id": client_id,
@@ -582,6 +618,18 @@ def authorization():
         )
 
         _response = json.loads(response.get_data(as_text=True))
+
+        if response.status_code != 200 or "error" in _response:
+            # Rejected by the authorization endpoint (e.g. a request_uri that
+            # was already used): the error goes to the registered redirect URI.
+            current_app.logger.warning(f"Session ID: {session_id}, Authorization Request rejected")
+            return auth_error_redirect(
+                authorization_args.get("redirect_uri"),
+                _response.get("error", "invalid_request"),
+                _response.get("error_description"),
+                client_id=authorization_args.get("client_id"),
+                state=authorization_args.get("state"),
+            )
 
         jws = _response.get("jws")
 
@@ -625,6 +673,7 @@ def authorization():
             "server_error",
             "internal_service_unavailable",
             client_id=authorization_args.get("client_id"),
+            state=authorization_args.get("state"),
         )
     except Exception as e:
         current_app.logger.error(
@@ -635,7 +684,25 @@ def authorization():
             "server_error",
             "unhandled_exception",
             client_id=authorization_args.get("client_id"),
+            state=authorization_args.get("state"),
         )
+
+
+@oidc_op_views.route("/token", methods=["GET", "PUT", "PATCH", "DELETE"])
+@oidc_op_views.route("/pushed_authorization", methods=["GET", "PUT", "PATCH", "DELETE"])
+@oidc_op_views.route("/introspection", methods=["GET", "PUT", "PATCH", "DELETE"])
+def post_only():
+    """405 for the POST-only endpoints (RFC 9126 section 2.3 for PAR).
+
+    Without these rules the app's static file route (``static_url_path=""``)
+    answers other methods with 404.
+    """
+    response = make_response(
+        json.dumps({"error": "invalid_request", "error_description": "the request must use POST"}),
+        405,
+        {"Content-Type": "application/json", "Allow": "POST"},
+    )
+    return response
 
 
 @oidc_op_views.route("/pushed_authorization", methods=["POST"])
@@ -648,7 +715,10 @@ def par_endpoint():
 
     # Validate required parameters
     if not all([client_id, redirect_uri, response_type]):
-        return jsonify({"error": "Missing required parameters"}), 400
+        return _oauth_error("invalid_request", "Missing required parameters")
+    if "request_uri" in request.form:
+        # RFC 9126 section 2.1: request_uri MUST NOT be pushed.
+        return _oauth_error("invalid_request", "request_uri is not allowed in a pushed authorization request")
 
     # Optional parameters
     scope = request.form.get("scope")
@@ -671,7 +741,10 @@ def par_endpoint():
         try:
             authorization_details = json.loads(request.form["authorization_details"])
         except json.JSONDecodeError:
-            return jsonify({"error": "Invalid authorization_details JSON"}), 400
+            return _oauth_error("invalid_request", "Invalid authorization_details JSON")
+        details_error = _authorization_details_error(authorization_details)
+        if details_error is not None:
+            return details_error
 
     registration_error, restore_client = dynamic_registration(
         client_id=client_id, redirect_uri=redirect_uri
@@ -687,9 +760,8 @@ def par_endpoint():
         current_app.logger.error(
             f"Error accessing pushed_authorization endpoint: {e}", exc_info=True
         )
-        abort(
-            500,
-            description="An internal server error occurred while processing the request.",
+        return _oauth_error(
+            "server_error", "An internal server error occurred while processing the request.", 500
         )
 
     if response.status_code >= 400:
@@ -723,10 +795,12 @@ def par_endpoint():
 
     except Exception as e:
         current_app.logger.error(f"Error adding request: {e}")
-        return jsonify({"error": "Failed to process request"}), 500
+        return _oauth_error("server_error", "Failed to process request", 500)
 
     current_app.logger.info(f", Session ID: {session_id}, Pushed Authorization Response")
 
+    # RFC 9126 section 2.2: the request URI is returned with 201 Created.
+    response.status_code = 201
     return response
 
 
@@ -735,8 +809,23 @@ def token():
     return service_endpoint(current_app.server.get_endpoint("token")) """
 
 
+def _refresh_token_lifetime():
+    """Seconds a refresh token is valid for (the authz usage rules), or None."""
+    _authz = current_app.server.get_context().authz
+    _rules = _authz.grant_config.get("usage_rules", {}).get("refresh_token", {})
+    return _rules.get("expires_in")
+
+
 @oidc_op_views.route("/token", methods=["POST"])
 def token():
+    response = _token_response()
+    # RFC 6749 section 5.1: responses carrying tokens must not be cached.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+def _token_response():
     req_args = dict([(k, v) for k, v in request.form.items()])
 
     grant_type = req_args.get("grant_type")
@@ -754,11 +843,17 @@ def token():
             jsonify({"error": "invalid_dpop_proof", "error_description": "A DPoP proof is required"}), 400
         )
 
+    if not grant_type:
+        # RFC 6749 section 5.2: a missing required parameter is invalid_request.
+        return make_response(
+            jsonify({"error": "invalid_request", "error_description": "missing grant_type"}), 400
+        )
+
     if grant_type == "authorization_code":
         code = req_args.get("code")
         if not code:
             return make_response(
-                jsonify({"error": "invalid_request", "description": "missing code"}),
+                jsonify({"error": "invalid_request", "error_description": "missing code"}),
                 400,
             )
 
@@ -790,7 +885,9 @@ def token():
 
         if "refresh_token" in response_json:
             request_manager.update_refresh_token(
-                session_id=session_id, refresh_token=response_json["refresh_token"]
+                session_id=session_id,
+                refresh_token=response_json["refresh_token"],
+                lifetime_seconds=_refresh_token_lifetime(),
             )
 
         return jsonify(response_json)  # Return as JSON
@@ -804,7 +901,7 @@ def token():
                 jsonify(
                     {
                         "error": "invalid_request",
-                        "description": "missing pre-authorized_code",
+                        "error_description": "missing pre-authorized_code",
                     }
                 ),
                 400,
@@ -812,7 +909,7 @@ def token():
 
         if not tx_code_from_request:
             return make_response(
-                jsonify({"error": "invalid_request", "description": "missing tx_code"}),
+                jsonify({"error": "invalid_request", "error_description": "missing tx_code"}),
                 400,
             )
 
@@ -827,7 +924,7 @@ def token():
         ):
             error_message = {
                 "error": "invalid_grant",
-                "description": "invalid or expired pre-authorized_code",
+                "error_description": "invalid or expired pre-authorized_code",
             }
             return make_response(jsonify(error_message), 400)
 
@@ -838,7 +935,7 @@ def token():
         if tx_code_check != "ok":
             error_message = {
                 "error": "invalid_grant",
-                "description": {
+                "error_description": {
                     "invalid": "invalid or expired pre-authorized_code",
                     "revoked": "pre-authorized_code revoked after too many attempts",
                 }.get(tx_code_check, "invalid tx_code"),
@@ -882,7 +979,9 @@ def token():
             )
         if "refresh_token" in response_json:
             request_manager.update_refresh_token(
-                session_id=session_id, refresh_token=response_json["refresh_token"]
+                session_id=session_id,
+                refresh_token=response_json["refresh_token"],
+                lifetime_seconds=_refresh_token_lifetime(),
             )
         return jsonify(response_json)  # Return as JSON
 
@@ -891,7 +990,7 @@ def token():
         if not refresh_token:
             return make_response(
                 jsonify(
-                    {"error": "invalid_request", "description": "missing refresh_token"}
+                    {"error": "invalid_request", "error_description": "missing refresh_token"}
                 ),
                 400,
             )
@@ -926,7 +1025,9 @@ def token():
 
         if "refresh_token" in response_json:
             request_manager.update_refresh_token(
-                session_id=session_id, refresh_token=response_json["refresh_token"]
+                session_id=session_id,
+                refresh_token=response_json["refresh_token"],
+                lifetime_seconds=_refresh_token_lifetime(),
             )
 
         current_app.logger.info(f", Session ID: {session_id}, Refresh Token Response issued")
@@ -937,7 +1038,7 @@ def token():
         # For any other grant type or if grant_type is missing
         error_message = {
             "error": "unsupported_grant_type",
-            "description": f"The grant type '{grant_type}' is not supported.",
+            "error_description": f"The grant type '{grant_type}' is not supported.",
         }
 
         current_app.logger.info("Token request with an unsupported grant_type")
@@ -1006,10 +1107,7 @@ def service_endpoint(endpoint, get_args=None, parse_kwargs=None):
             return _client_authn_error(err)
         except Exception as err:
             _log.error(err)
-            return make_response(
-                json.dumps({"error": "invalid_request", "error_description": str(err)}),
-                400,
-            )
+            return _oauth_error("invalid_request", str(err))
     else:
         if request.data:
             if isinstance(request.data, str):
@@ -1029,17 +1127,11 @@ def service_endpoint(endpoint, get_args=None, parse_kwargs=None):
             return _client_authn_error(err)
         except Exception as err:
             _log.error(err)
-            err_msg = ResponseMessage(
-                error="invalid_request", error_description=str(err)
-            )
-            return make_response(err_msg.to_json(), 400)
+            return _oauth_error("invalid_request", str(err))
 
     if isinstance(req_args, ResponseMessage) and "error" in req_args:
         _log.info("Error response: {}".format(redact(req_args)))
-        _resp = make_response(req_args.to_json(), 400)
-        if request.method == "POST":
-            _resp.headers["Content-type"] = "application/json"
-        return _resp
+        return make_response(req_args.to_json(), 400, {"Content-Type": "application/json"})
     try:
         _log.debug("request: {}".format(redact(req_args)))
         if isinstance(endpoint, Token):
@@ -1056,8 +1148,7 @@ def service_endpoint(endpoint, get_args=None, parse_kwargs=None):
     except Exception as err:
         message = traceback.format_exception(*sys.exc_info())
         _log.error(message)
-        err_msg = ResponseMessage(error="invalid_request", error_description=str(err))
-        return make_response(err_msg.to_json(), 400)
+        return _oauth_error("invalid_request", str(err))
 
     _log.debug("Response args: {}".format(redact(args)))
 
@@ -1144,6 +1235,7 @@ def prea_auth():
             "server_error",
             "internal_service_unavailable",
             client_id=authorization_args.get("client_id"),
+            state=authorization_args.get("state"),
         )
     except Exception as e:
         current_app.logger.error(
@@ -1154,6 +1246,7 @@ def prea_auth():
             "server_error",
             "unhandled_exception",
             client_id=authorization_args.get("client_id"),
+            state=authorization_args.get("state"),
         )
 
     tx_code = 10000 + secrets.randbelow(90000)
