@@ -93,6 +93,7 @@ op:
             - https://backend.dev.issuer.eudiw.dev/pushed_authorization
             - https://backend.dev.issuer.eudiw.dev/oidc/pushed_authorization
             - https://age-verification.issuer.eudiw.dev/pushed_authorization
+            - https://refractor-ec.dev.issuer.eudiw.dev/pushed_authorization
 
     # Which tokens a grant can produce, and their lifetimes (seconds).
     authz:
@@ -201,6 +202,10 @@ op:
           # list validator (checks the attestation is not revoked).
           trust_validator_url: https://trust-validator.eudiw.dev/trust
           status_validator_url: https://status-validator.issuer.eudiw.dev/status
+          # Issuer identifiers of the frontends that relay PAR and /token here
+          # (each frontend's "url"): wallets name them as the PoP "aud".
+          pop_allowed_aud:
+            - https://refractor-ec.dev.issuer.eudiw.dev
       pushed_authorization:
         path: pushed_authorization
         class: idpyoidc.server.oauth2.pushed_authorization.PushedAuthorization
