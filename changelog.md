@@ -48,7 +48,12 @@ _06 Oct 2026_
 - Log lines no longer contain the client's `client_id` (rejected redirect URI), `request_uri` (unknown request) or the form of an unsupported token request (SonarCloud log injection); `TestLogInjection`.
 - Removed `yaml_to_json.py` (unused since the configuration is YAML; it was copied into the image). `application.py` documents why the CSRF hotspot (S4502) is safe.
 
+- Wallet attestation failures at `/token` and `/pushed_authorization` answer `400 invalid_client` instead of `401`: RFC 6749 section 5.2 requires 401 (with a `WWW-Authenticate` header) only when the client authenticates with the `Authorization` header, which a wallet attestation does not use.
+- `/authorization` passes only `client_id` and `request_uri` to the authorization endpoint, which resolves the pushed request itself (RFC 9126 section 4). Needs the idpy-oidc fork with that change.
+- `par_allowed_htu` (DPoP add-on): the public `/pushed_authorization` URLs a DPoP proof sent there may name.
+
 ### Fixed
+- A code from an authorization request with `dpop_jkt` could be redeemed with a DPoP proof by any key (RFC 9449 section 10). It is now refused with `invalid_dpop_proof` unless the proof is by that key; a DPoP proof sent with the pushed authorization request binds the code the same way (section 10.1).
 - `python3 server.py -d <config>` crashed (`app.endpoint_context` does not exist); it prints the provider information from `app.server.get_context()` again.
 - Error redirects from `/verify/user` (`authentication_error_redirect`) now carry the authorization request's `state` (RFC 6749 4.1.2.1) and append to a `redirect_uri` that already has a query with `&`.
 - `views.py` reads the DPoP header with `request.headers.get()`; the reviewed CSRF finding in `application.py` is marked `# NOSONAR`.

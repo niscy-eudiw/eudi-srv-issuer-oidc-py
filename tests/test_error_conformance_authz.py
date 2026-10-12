@@ -128,7 +128,7 @@ class TestPushedAuthorizationRequest:
         else:
             headers = wia()
             assert _par(client, headers).status_code == 201
-        assert_oauth_error(_par(client, headers), "invalid_client", 401)
+        assert_oauth_error(_par(client, headers), "invalid_client", 400)
 
     def test_server_error_is_json(self, client, wia, monkeypatch):
         def fail(**kwargs):

@@ -87,6 +87,12 @@ op:
             - https://backend.dev.issuer.eudiw.dev/token
             - https://backend.dev.issuer.eudiw.dev/oidc/token
             - https://age-verification.issuer.eudiw.dev/token
+          # Pushed authorization endpoint URLs a proof's "htu" may name: a DPoP
+          # proof sent there binds the code to its key (RFC 9449 section 10.1).
+          par_allowed_htu:
+            - https://backend.dev.issuer.eudiw.dev/pushed_authorization
+            - https://backend.dev.issuer.eudiw.dev/oidc/pushed_authorization
+            - https://age-verification.issuer.eudiw.dev/pushed_authorization
 
     # Which tokens a grant can produce, and their lifetimes (seconds).
     authz:

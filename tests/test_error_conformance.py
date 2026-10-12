@@ -139,31 +139,27 @@ class TestClientAuthentication:
         )
 
     def test_without_attestation(self, client, key):
-        assert_token_error(self._token(client, {}, key), "invalid_client", 401)
+        assert_token_error(self._token(client, {}, key), "invalid_client", 400)
 
     def test_forged_attestation(self, client, wia, key):
-        assert_token_error(self._token(client, wia(signer=_new_key()), key), "invalid_client", 401)
+        assert_token_error(self._token(client, wia(signer=_new_key()), key), "invalid_client", 400)
 
     def test_expired_attestation(self, client, wia, key):
-        assert_token_error(self._token(client, _expired_wia(wia), key), "invalid_client", 401)
+        assert_token_error(self._token(client, _expired_wia(wia), key), "invalid_client", 400)
 
     def test_pop_for_another_server(self, client, wia, key):
-        assert_token_error(self._token(client, wia(pop_aud="https://other-as.test"), key), "invalid_client", 401)
+        assert_token_error(self._token(client, wia(pop_aud="https://other-as.test"), key), "invalid_client", 400)
 
     def test_attestation_for_another_client_id(self, client, wia, key):
         response = self._token(client, wia(), key, client_id="someone-else")
-        assert_token_error(response, "invalid_client", 401)
+        assert_token_error(response, "invalid_client", 400)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="RFC 9110 section 15.5.2 / RFC 6749 section 5.2: a 401 invalid_client carries no "
-        "WWW-Authenticate (views._client_authn_error); no scheme is defined for attestation-based "
-        "client authentication, so either 400 or a scheme needs deciding",
-    )
-    def test_401_has_www_authenticate(self, client, key):
+    def test_attestation_failure_is_400(self, client, key):
+        # RFC 6749 section 5.2: 401 (with WWW-Authenticate) is only required when
+        # the client used the Authorization header; a wallet attestation does not.
         response = self._token(client, {}, key)
-        assert response.status_code == 401
-        assert "WWW-Authenticate" in response.headers
+        assert response.status_code == 400
+        assert "WWW-Authenticate" not in response.headers
 
 
 class TestAuthorizationCodeGrant:
@@ -254,7 +250,7 @@ class TestPreAuthorizedCodeGrant:
         # No wallet attestation: this server does not support anonymous access.
         code = _preauth_code(client)
         response = _redeem(client, _with_dpop(), code["preauth_code"], str(code["tx_code"]))
-        assert_token_error(response, "invalid_client", 401)
+        assert_token_error(response, "invalid_client", 400)
 
     def test_successful_response_is_not_cached(self, client, wia):
         code = _preauth_code(client)
@@ -315,7 +311,7 @@ class TestRefreshTokenGrant:
         assert_token_error(self._refresh(client, wia(), tokens["refresh_token"], _new_key()), "invalid_dpop_proof")
 
     def test_without_attestation(self, client, key, tokens):
-        assert_token_error(self._refresh(client, {}, tokens["refresh_token"], key), "invalid_client", 401)
+        assert_token_error(self._refresh(client, {}, tokens["refresh_token"], key), "invalid_client", 400)
 
 
 class TestDpopProof:

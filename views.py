@@ -503,39 +503,21 @@ def authorization():
         )
 
         scope = current_request.scope
-        authorization_details = None
+        authorization_details = getattr(current_request, "authorization_details", None) or None
 
+        # RFC 9126 section 4: the authorization endpoint resolves the pushed
+        # request itself; client_id and request_uri are all it needs.
+        endpoint_args = {
+            "client_id": current_request.client_id,
+            "request_uri": current_request.request_uri,
+        }
+        # For error redirects to the wallet.
         authorization_args = {
             "client_id": current_request.client_id,
             "redirect_uri": current_request.redirect_uri,
-            "scope": current_request.scope,
-            "client_id": current_request.client_id,
-            "request_uri": current_request.request_uri,
-            "response_type": current_request.response_type,
         }
-
-        if hasattr(current_request, "state") and current_request.state:
+        if getattr(current_request, "state", None):
             authorization_args["state"] = current_request.state
-        if (
-            hasattr(current_request, "code_challenge_method")
-            and current_request.code_challenge_method
-        ):
-            authorization_args["code_challenge_method"] = (
-                current_request.code_challenge_method
-            )
-        if (
-            hasattr(current_request, "code_challenge")
-            and current_request.code_challenge
-        ):
-            authorization_args["code_challenge"] = current_request.code_challenge
-        if (
-            hasattr(current_request, "authorization_details")
-            and current_request.authorization_details
-        ):
-            authorization_details = current_request.authorization_details
-            authorization_args["authorization_details"] = (
-                current_request.authorization_details
-            )
 
     else:
         # HAIP requires PAR: only a pushed request has its client (WIA)
@@ -609,12 +591,13 @@ def authorization():
             authorization_args["code_challenge_method"] = code_challenge_method
         if state:
             authorization_args["state"] = state
+        endpoint_args = authorization_args
 
     try:
 
         response = service_endpoint(
             current_app.server.get_endpoint("authorization"),
-            get_args=authorization_args,
+            get_args=endpoint_args,
         )
 
         _response = json.loads(response.get_data(as_text=True))
@@ -1067,10 +1050,16 @@ IGNORE = ["cookie", "user-agent"]
 
 
 def _client_authn_error(err):
-    """401 invalid_client: the client (its wallet attestation) did not authenticate."""
+    """400 invalid_client: the client (its wallet attestation) did not authenticate.
+
+    RFC 6749 section 5.2 requires 401, with a WWW-Authenticate header (RFC 9110
+    section 15.5.2), only when the client authenticated with the Authorization
+    header. A wallet attestation is sent in the OAuth-Client-Attestation headers
+    and has no HTTP authentication scheme, so 400 is used.
+    """
     return make_response(
         json.dumps({"error": "invalid_client", "error_description": str(err) or "client authentication failed"}),
-        401,
+        400,
         {"Content-Type": "application/json"},
     )
 

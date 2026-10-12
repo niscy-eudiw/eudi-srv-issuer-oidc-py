@@ -458,25 +458,25 @@ class TestWalletAttestationRequired:
 
     def test_par_without_wia(self, client):
         response = self._par(client)
-        assert response.status_code == 401
+        assert response.status_code == 400
         assert json.loads(response.data)["error"] == "invalid_client"
 
     def test_par_forged_wia(self, client, wia):
         from cryptography.hazmat.primitives.asymmetric import ec
 
-        assert self._par(client, wia(signer=ec.generate_private_key(ec.SECP256R1()))).status_code == 401
+        assert self._par(client, wia(signer=ec.generate_private_key(ec.SECP256R1()))).status_code == 400
 
     def test_par_preauth_redirect_does_not_bypass_client_check(self, client, wia):
         # The server's own "preauth" placeholder is refused before client authentication.
         assert self._par(client, wia("another-wallet"), redirect_uri="preauth").status_code in (400, 401)
 
     def test_par_pop_for_another_server(self, client, wia):
-        assert self._par(client, wia(pop_aud="https://other-as.test")).status_code == 401
+        assert self._par(client, wia(pop_aud="https://other-as.test")).status_code == 400
 
     def test_par_pop_replayed(self, client, wia):
         headers = wia()
         assert self._par(client, headers).status_code in (200, 201)
-        assert self._par(client, headers).status_code == 401
+        assert self._par(client, headers).status_code == 400
 
     def test_authorization_code_token_with_wia(self, client, wia):
         response = self._code_token(client, self._auth_code(client), wia())
@@ -484,7 +484,7 @@ class TestWalletAttestationRequired:
 
     def test_authorization_code_token_without_wia(self, client):
         response = self._code_token(client, self._auth_code(client))
-        assert response.status_code == 401
+        assert response.status_code == 400
 
     def test_preauthorized_token_without_wia(self, client):
         body = client.post(
@@ -499,7 +499,7 @@ class TestWalletAttestationRequired:
             },
             headers=_with_dpop(),
         )
-        assert response.status_code == 401
+        assert response.status_code == 400
 
 
 class TestPkceRequired:
@@ -577,7 +577,7 @@ class TestClientRegistration:
         cdb = app.server.get_context().cdb
         before = dict(cdb[CLIENT_ID])
         response = self._par(client, redirect_uri="https://other.test/cb")  # no WIA
-        assert response.status_code == 401
+        assert response.status_code == 400
         assert dict(cdb[CLIENT_ID]) == before
 
     def test_failed_client_authentication_registers_nothing(self, app, client):
@@ -846,7 +846,7 @@ class TestOptionalProtocolFeatures:
         from cryptography.hazmat.primitives.asymmetric import ec
 
         forged = wia(signer=ec.generate_private_key(ec.SECP256R1()))
-        assert self._par(client, forged).status_code == 401
+        assert self._par(client, forged).status_code == 400
 
     def test_pkce_plain_is_still_refused_when_pkce_is_optional(self, relaxed, client):
         response = self._par(client, code_challenge="x" * 43, code_challenge_method="plain")

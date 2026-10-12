@@ -167,15 +167,92 @@ class TestRefreshTokenGrant:
         assert response.get_json() == {"error": "invalid_request", "error_description": "missing refresh_token"}
 
     def test_refresh_rejected_by_the_token_endpoint_is_passed_on(self, client, wia, key):
-        """Without the wallet attestation the token endpoint answers 401."""
+        """Without the wallet attestation the token endpoint answers 400 invalid_client."""
         first = _code_tokens(client, wia, key)
         response = client.post(
             "/token",
             data={"grant_type": "refresh_token", "refresh_token": first["refresh_token"], "client_id": CLIENT_ID},
             headers={"DPoP": _dpop_proof(key)},
         )
-        assert response.status_code == 401
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_client"
 
+
+PAR_HTU = "https://backend.dev.issuer.eudiw.dev/oidc/pushed_authorization"
+
+
+class TestDpopKeyFromAuthorizationRequest:
+    """RFC 9449 section 10: a key named in the authorization request (dpop_jkt,
+    or the DPoP proof at PAR, section 10.1) is the only one the code redeems with."""
+
+    def _redeem(self, client, wia, code, key):
+        return client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "code_verifier": VERIFIER,
+            },
+            headers={**wia(), "DPoP": _dpop_proof(key)},
+        )
+
+    def _code_from_par(self, client, wia, headers):
+        args = {**TestWalletAttestationRequired.PAR, "code_challenge": CHALLENGE, "code_challenge_method": "S256"}
+        pushed = client.post("/pushed_authorization", data=args, headers={**wia(), **headers})
+        assert pushed.status_code == 201, pushed.data
+        response = client.get(
+            "/authorization", query_string={"client_id": CLIENT_ID, "request_uri": pushed.get_json()["request_uri"]}
+        )
+        assert response.status_code == 302, response.data
+        mine = {k: v[0] for k, v in parse_qs(urlsplit(response.headers["Location"]).query).items()}
+        location = client.get(
+            "/verify/user", query_string={"token": mine["token"], "username": mine["session_id"]}
+        ).headers["Location"]
+        return parse_qs(urlsplit(location).query)["code"][0]
+
+    def test_code_bound_with_dpop_jkt_needs_that_key(self, client, wia, key):
+        code = _code(client, dpop_jkt=_jkt(key))
+        response = self._redeem(client, wia, code, ec.generate_private_key(ec.SECP256R1()))
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_dpop_proof"
+        # The refused attempt did not use up the code.
+        response = self._redeem(client, wia, code, key)
+        assert response.status_code == 200, response.data
+        assert response.get_json()["token_type"] == "DPoP"
+
+    def test_dpop_proof_at_par_binds_the_code(self, client, wia, key):
+        code = self._code_from_par(client, wia, {"DPoP": _dpop_proof(key, htu=PAR_HTU)})
+        response = self._redeem(client, wia, code, ec.generate_private_key(ec.SECP256R1()))
+        assert response.get_json()["error"] == "invalid_dpop_proof"
+        assert self._redeem(client, wia, code, key).status_code == 200
+
+    def test_par_proof_must_match_dpop_jkt(self, client, wia, key):
+        args = {**TestWalletAttestationRequired.PAR, "dpop_jkt": _jkt(ec.generate_private_key(ec.SECP256R1()))}
+        response = client.post(
+            "/pushed_authorization", data=args, headers={**wia(), "DPoP": _dpop_proof(key, htu=PAR_HTU)}
+        )
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_dpop_proof"
+
+    def test_invalid_proof_at_par_is_refused(self, client, wia, key):
+        # A proof for /token is not one for /pushed_authorization.
+        response = client.post(
+            "/pushed_authorization", data=TestWalletAttestationRequired.PAR, headers={**wia(), "DPoP": _dpop_proof(key)}
+        )
+        assert response.status_code == 400
+        assert response.get_json()["error"] == "invalid_dpop_proof"
+
+
+def test_pushed_authorization_details_reach_the_token_response(client, wia, key):
+    # The authorization endpoint resolves the pushed request (RFC 9126 section 4):
+    # its authorization_details are returned with the token (RFC 9396 section 6).
+    details = [{"type": "openid_credential", "credential_configuration_id": "eu.europa.ec.eudi.pid_mdoc"}]
+    code = _code(client, authorization_details=json.dumps(details))
+    response = TestDpopKeyFromAuthorizationRequest()._redeem(client, wia, code, key)
+    assert response.status_code == 200, response.data
+    assert response.get_json()["authorization_details"] == details
 
 class TestTokenErrors:
     def test_unsupported_grant_type(self, client):
@@ -718,9 +795,9 @@ class TestServiceEndpoint:
             return views.service_endpoint(endpoint)
 
     @pytest.mark.parametrize("method", ["GET", "POST"])
-    def test_client_authentication_error_is_401(self, app, method):
+    def test_client_authentication_error_is_400(self, app, method):
         response = self._call(app, FakeEndpoint(parse=ClientAuthenticationError("bad wia")), method)
-        assert response.status_code == 401
+        assert response.status_code == 400
         assert json.loads(response.data) == {"error": "invalid_client", "error_description": "bad wia"}
 
     @pytest.mark.parametrize("method", ["GET", "POST"])
