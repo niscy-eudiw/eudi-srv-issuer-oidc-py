@@ -21,10 +21,7 @@ jobs:
           python-version: '3.13'
       - name: Install dependencies
         run: |
-          # Hash-locked, wheels only; the idpy-oidc fork (a commit archive) is the
-          # one package built, with the locked setuptools (requirements-build.lock).
-          pip install --require-hashes --only-binary :all: -r requirements-build.lock
-          pip install --require-hashes --only-binary :all: --no-binary idpyoidc --no-build-isolation -r requirements-dev.lock
+          pip install -r requirements-dev.txt
       - name: Run tests
         run: pytest -q
 
@@ -39,5 +36,5 @@ jobs:
           python-version: '3.13'
       - name: Security rules (.semgrep/)
         run: |
-          pip install --require-hashes --only-binary :all: -r .github/semgrep-requirements.lock
+          pip install semgrep==1.179.0
           semgrep --config .semgrep/ --metrics=off --error --exclude tests .

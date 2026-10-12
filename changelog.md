@@ -42,8 +42,10 @@ _06 Oct 2026_
 
 ## [Unreleased]
 
+### Changed
+- Dependencies are installed from `requirements.txt` like the other services; the idpy-oidc fork follows `branch-refractoring` instead of a pinned commit.
+
 ### Security
-- Dependencies are installed from hash-locked files (`requirements.lock`, `requirements-dev.lock`, `requirements-build.lock`, `.github/semgrep-requirements.lock`, generated with pip-tools) with `--require-hashes --only-binary :all:`, in the Dockerfile and in CI: no unpinned indirect dependency and no setup script runs, except the idpy-oidc fork, now a commit archive with a pinned hash built with the locked setuptools. The builder image no longer needs compilers or git, and no step upgrades pip unpinned.
 - GitHub Actions: the Docker actions of `pipeline.yml` are pinned to full commit SHAs; every workflow has `permissions: {}` at workflow level and read-only permissions per job (`dependencycheck.yml` and `gitleaks.yml` had the default token permissions).
 - Log lines no longer contain the client's `client_id` (rejected redirect URI), `request_uri` (unknown request) or the form of an unsupported token request (SonarCloud log injection); `TestLogInjection`.
 - Removed `yaml_to_json.py` (unused since the configuration is YAML; it was copied into the image). `application.py` documents why the CSRF hotspot (S4502) is safe.
