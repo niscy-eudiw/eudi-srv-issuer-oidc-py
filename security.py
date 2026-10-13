@@ -67,9 +67,11 @@ def valid_redirect_uri(uri: Optional[str]) -> bool:
     """Checks a wallet redirect URI, following RFC 8252 (OAuth for native apps).
 
     Accepted: an ``https`` URL with a host, an ``http`` URL on a loopback
-    address, or a private-use scheme in reverse-domain form (it contains a
-    ``.``, e.g. ``eu.europa.ec.euidi://authorization``). A fragment is never
-    allowed (RFC 6749 3.1.2).
+    address, or any other private-use scheme (e.g.
+    ``eu.europa.ec.euidi://authorization``, ``asitplus-wallet://...``) except
+    those that run code or read local data in a browser. RFC 8252 7.1 only
+    recommends reverse-domain schemes, and wallets in use do not follow it. A
+    fragment is never allowed (RFC 6749 3.1.2).
 
     Args:
         uri: The ``redirect_uri`` a client sent.
@@ -92,7 +94,7 @@ def valid_redirect_uri(uri: Optional[str]) -> bool:
         return bool(parts.hostname) and not parts.username and not parts.password
     if scheme == "http":
         return _is_loopback(parts.hostname) and not parts.username and not parts.password
-    return "." in scheme
+    return True
 
 
 def _is_loopback(host: Optional[str]) -> bool:

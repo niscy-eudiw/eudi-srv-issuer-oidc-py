@@ -22,6 +22,8 @@ class TestValidRedirectUri:
             "http://127.0.0.1/cb",
             "http://[::1]:5000/cb",
             "eu.europa.ec.euidi://authorization",
+            "asitplus-wallet://wallet.a-sit.plus/app/callback/provisioning",
+            "myapp://cb",  # private-use scheme not in reverse-domain form
             "HTTPS://wallet.test/cb",
         ],
     )
@@ -46,10 +48,12 @@ class TestValidRedirectUri:
             "http:///cb",  # http without host
             "http://10.0.0.1/cb",
             "http://user@127.0.0.1/cb",
-            "myapp://cb",  # private-use scheme not in reverse-domain form
             "data:text/html,x",
             "javascript:alert(1)",
             "file:///etc/passwd",
+            "VBScript:x",
+            "blob:https://wallet.test/x",
+            "about:blank",
             "/relative/cb",
             "https://wallet.test/cb#frag",
             "https://wallet.test/cb#",  # empty fragment
