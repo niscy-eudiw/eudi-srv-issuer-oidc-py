@@ -15,6 +15,7 @@ Parameters that should be changed:
 
 - `trust_validator_url` WIA trust validator URL. Source code available at [eudi-srv-trust-validator](https://github.com/eu-digital-identity-wallet/eudi-srv-trust-validator)
 - `status_validator_url` endpoint URL for checking revocation/validity status of Referenced Tokens against a Token Status List. Source code available at [eudi-srv-status-validator-py](https://github.com/eu-digital-identity-wallet/eudi-srv-status-validator-py)
+- `status_validation_context` Verification context sent to the status validator for the status list in the WIA's `client_status`. Defaults to `WalletOrKeyStorageStatus`.
 - `trusted_attesters_path` WIA trust validation by pem certificate files path
 
 trust_validator_url and trusted_attesters_path should not be used at the same time.

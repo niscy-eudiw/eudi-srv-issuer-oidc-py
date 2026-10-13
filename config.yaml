@@ -202,6 +202,9 @@ op:
           # list validator (checks the attestation is not revoked).
           trust_validator_url: https://trust-validator.eudiw.dev/trust
           status_validator_url: https://status-validator.issuer.eudiw.dev/status
+          # Status validator context for the status list behind the WIA's
+          # client_status (wallet provider lists, not PID lists).
+          status_validation_context: WalletOrKeyStorageStatus
           # Issuer identifiers of the frontends that relay PAR and /token here
           # (each frontend's "url"): wallets name them as the PoP "aud".
           pop_allowed_aud:
