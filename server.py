@@ -10,9 +10,11 @@ from idpyoidc.server.configure import OPConfiguration
 from idpyoidc.ssl_context import create_context
 
 try:
+    from . import housekeeping
     from .application import oidc_provider_init_app
     from .security import configure_client_authentication, init_rate_limits
 except (ModuleNotFoundError, ImportError):
+    import housekeeping
     from application import oidc_provider_init_app
     from security import configure_client_authentication, init_rate_limits
 
@@ -87,6 +89,8 @@ def create_app(config_file: str):
     # Wallet attestation (WIA) at PAR and /token, unless this is false.
     app.require_wallet_attestation = getattr(config, "require_wallet_attestation", True) is not False
     configure_client_authentication(app, app.require_wallet_attestation)
+    # Minutes between two removals of expired in-memory entries.
+    app.cleanup_interval = getattr(config, "cleanup_interval", None) or housekeeping.DEFAULT_CLEANUP_INTERVAL
     return app, config
 
 
@@ -106,6 +110,8 @@ def main(config_file, args):
     """ if context:
         kwargs["ssl_context"] = context """
         # kwargs["request_handler"] = PeerCertWSGIRequestHandler
+
+    housekeeping.start(app, app.cleanup_interval)
 
     # Containers need every interface; set webserver.host to 127.0.0.1 to
     # keep a bare-metal or development server off the network.

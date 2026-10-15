@@ -88,6 +88,17 @@ class TestOneTimeUse:
         assert once.first_use("c", 5) is True
         assert len(once._seen) == 1
 
+    def test_purge_expired_keeps_live_entries(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(security, "time", SimpleNamespace(time=lambda: now[0]))
+        once = OneTimeUse()
+        once.first_use("a", 5)
+        once.first_use("b", 60)
+        now[0] += 6
+        assert once.purge_expired() == 1
+        assert once.first_use("b", 60) is False
+        assert once.first_use("a", 5) is True
+
     def test_full_store_of_live_entries_fails_closed(self):
         once = OneTimeUse(max_entries=2)
         assert once.first_use("a", 60) and once.first_use("b", 60)

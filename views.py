@@ -471,7 +471,6 @@ def dynamic_registration(client_id, redirect_uri, internal=False):
 def authorization():
     # 1. Handle PAR Authorization Request
 
-    request_manager.clean_expired_requests()
     if "request_uri" in request.args:
         request_uri = request.args.get("request_uri")
 

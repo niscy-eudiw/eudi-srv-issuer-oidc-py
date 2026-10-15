@@ -83,6 +83,9 @@ class TestMain:
         monkeypatch.setattr(
             server, "create_context", lambda path, conf: calls.setdefault("context", (path, conf))
         )
+        monkeypatch.setattr(
+            server.housekeeping, "start", lambda app, interval: calls.setdefault("housekeeping", interval)
+        )
         return calls
 
     def test_runs_with_the_webserver_settings(self, tmp_path, started):
@@ -91,6 +94,11 @@ class TestMain:
         assert started["run"] == {"host": "127.0.0.1", "port": 5123, "debug": False}
         assert started["context"][0] == server.dir_path
         assert started["context"][1]["port"] == 5123
+        assert started["housekeeping"] == server.housekeeping.DEFAULT_CLEANUP_INTERVAL
+
+    def test_starts_housekeeping_with_the_configured_interval(self, tmp_path, started):
+        server.main(_config(tmp_path, cleanup_interval=5), argparse.Namespace(display=False))
+        assert started["housekeeping"] == 5
 
     def test_host_defaults_to_every_interface(self, tmp_path, started):
         server.main(_config(tmp_path, webserver={"port": 5001, "debug": True}), argparse.Namespace(display=False))
@@ -100,7 +108,7 @@ class TestMain:
         with pytest.raises(SystemExit) as exc:
             server.main(_config(tmp_path), argparse.Namespace(display=True))
         assert exc.value.code == 0
-        assert "run" not in started
+        assert "run" not in started and "housekeeping" not in started
         info = json.loads(capsys.readouterr().out)
         assert info["issuer"] == "https://issuer.eudiw.dev/oidc"
 

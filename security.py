@@ -125,13 +125,24 @@ class OneTimeUse:
         now = time.time()
         with self._lock:
             if len(self._seen) >= self._max_entries:
-                self._seen = {k: exp for k, exp in self._seen.items() if exp > now}
+                self._purge_expired(now)
             if self._seen.get(key, 0) > now:
                 return False
             if len(self._seen) >= self._max_entries:
                 return False  # full of live entries: fail closed
             self._seen[key] = now + ttl
             return True
+
+    def purge_expired(self) -> int:
+        """Forgets expired values; returns how many were removed."""
+        with self._lock:
+            return self._purge_expired(time.time())
+
+    def _purge_expired(self, now: float) -> int:
+        """Call with the lock held."""
+        before = len(self._seen)
+        self._seen = {k: exp for k, exp in self._seen.items() if exp > now}
+        return before - len(self._seen)
 
 
 #: Authentication hand-off tokens already redeemed at /verify/user.

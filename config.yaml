@@ -52,6 +52,10 @@ rate_limiting:
   # relayed PAR shares one limit. Only these peers can choose the limit key.
   forwarders: []
 
+# Minutes between two removals of expired authorization requests, redeemed
+# authentication tokens and unredeemed pushed requests from memory (default 60).
+cleanup_interval: 60
+
 # --- OpenID4VCI options -------------------------------------------------------
 # OpenID4VCI 1.0 RECOMMENDS these but does not require them. They are on by
 # default; switch one off only to test wallets without the feature. A feature
