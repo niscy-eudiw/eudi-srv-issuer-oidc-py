@@ -36,5 +36,5 @@ jobs:
           python-version: '3.13'
       - name: Security rules (.semgrep/)
         run: |
-          pip install semgrep==1.179.0
+          pip install --only-binary :all: semgrep==1.179.0
           semgrep --config .semgrep/ --metrics=off --error --exclude tests .

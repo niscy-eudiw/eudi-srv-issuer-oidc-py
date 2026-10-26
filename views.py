@@ -172,13 +172,15 @@ def auth_error_redirect(return_uri, error, error_description=None, client_id=Non
     if client_id:
         registered = current_app.server.get_context().cdb.get(client_id, {}).get("redirect_uris", [])
         registered = [uri[0] if isinstance(uri, (list, tuple)) else uri for uri in registered]
-    if return_uri and return_uri in registered and valid_redirect_uri(return_uri):
+    # The redirect is built from the registered copy, never from the request's.
+    target = next((uri for uri in registered if return_uri and uri == return_uri), None)
+    if target and valid_redirect_uri(target):
         params = dict(error_msg)
         if state:
             # RFC 6749 4.1.2.1: the state of the authorization request comes back.
             params["state"] = state
-        separator = "&" if urllib.parse.urlsplit(return_uri).query else "?"
-        return redirect(return_uri + separator + urllib.parse.urlencode(params), code=302)
+        separator = "&" if urllib.parse.urlsplit(target).query else "?"
+        return redirect(target + separator + urllib.parse.urlencode(params), code=302)
 
     status = 500 if error == "server_error" else 400
     return make_response(json.dumps(error_msg), status, {"Content-Type": "application/json"})

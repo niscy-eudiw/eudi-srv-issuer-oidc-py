@@ -68,6 +68,7 @@ Needs the idpy-oidc fork's `branch-refractoring` (installed from `requirements.t
 - `server.create_app(config_file)` builds the application; `main()` and the tests use it (the tests copied the build steps before, so start-up was untested). Test coverage 70% -> 98%: `tests/test_server.py`, `test_views.py`, `test_security_helpers.py`, `test_housekeeping.py` and more `test_request_manager.py`.
 - Dependencies are installed from `requirements.txt` like the other services; the idpy-oidc fork follows `branch-refractoring` instead of a pinned commit (an image built from an older pin ran without the wallet attestation fixes).
 - `pyjwt` 2.12.1 -> 2.15.1 (PYSEC-2026-178, PYSEC-2026-4140 to 4152, PYSEC-2026-4183).
+- The Docker build no longer upgrades pip (unpinned); the CI installs semgrep from wheels only (`--only-binary :all:`), so no setup script runs (SonarCloud).
 
 ### Fixed
 - A code from an authorization request with `dpop_jkt` could be redeemed with a DPoP proof by any key (RFC 9449 section 10). It is now refused with `invalid_dpop_proof` unless the proof is by that key; a DPoP proof sent with the pushed authorization request binds the code the same way (section 10.1).
@@ -77,6 +78,7 @@ Needs the idpy-oidc fork's `branch-refractoring` (installed from `requirements.t
 - Expired authorization requests were not cleaned during the first minute after the host booted: `RequestManager` compared `time.monotonic()` (seconds since boot) with a last-clean time of 0. It now starts at `-inf`, so the first call cleans.
 - Error redirects from `/verify/user` (`authentication_error_redirect`) carry the authorization request's `state` (RFC 6749 4.1.2.1) and append to a `redirect_uri` that already has a query with `&`.
 - `python3 server.py -d <config>` crashed (`app.endpoint_context` does not exist); it prints the provider information from `app.server.get_context()` again.
+- `auth_error_redirect` builds the error redirect from the client's registered redirect URI instead of the request's `redirect_uri` (SonarCloud open redirect, RFC 6749 4.1.2.1). Only registered URIs were accepted before as well, so behaviour is unchanged.
 
 ### Security
 - GitHub Actions: the Docker actions of `pipeline.yml` are pinned to full commit SHAs; every workflow has `permissions: {}` at workflow level and read-only permissions per job (`dependencycheck.yml` and `gitleaks.yml` had the default token permissions).

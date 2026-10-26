@@ -7,8 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.13-slim
