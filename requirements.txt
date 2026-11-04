@@ -1,4 +1,4 @@
 flask==3.1.3
 Flask-Limiter==4.1.1
-idpyoidc @ git+https://github.com/eu-digital-identity-wallet/idpy-oidc.git@main
+idpyoidc @ git+https://github.com/eu-digital-identity-wallet/idpy-oidc.git@f69b99ab2ef51f1c669a140b4ae8cdb595215a60
 pyjwt==2.15.1
